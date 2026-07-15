@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=82,<83"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "exoplanets-mf-gps"
+version = "0.1.0"
+description = "Reproducible multifidelity Gaussian-process research for exoplanet spectra"
+readme = "README.md"
+requires-python = ">=3.11,<3.15"
+dependencies = [
+    "matplotlib==3.10.8",
+    "numpy==2.4.4",
+    "pandas==2.3.3",
+    "scikit-learn==1.8.0",
+    "scipy==1.17.1",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]

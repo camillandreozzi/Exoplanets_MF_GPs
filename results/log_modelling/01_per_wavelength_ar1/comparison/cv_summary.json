@@ -1,0 +1,16 @@
+{
+  "model_a": "Model 1A (global rho)",
+  "model_b": "Model 1B (per-wavelength rho)",
+  "n_samples": 97,
+  "n_splits": 97,
+  "seed": 0,
+  "rho_global": 0.4602900152340266,
+  "rmse_pooled_a": 0.15339329699703919,
+  "rmse_pooled_b": 0.14826858505967422,
+  "nrmse_pooled_a": 0.05638301930014808,
+  "nrmse_pooled_b": 0.05449932074402587,
+  "delta_rmse_pooled": -0.0051247119373649674,
+  "delta_rmse_per_sample_mean": -0.007727076084782733,
+  "delta_rmse_per_sample_std": 0.014537640002281567,
+  "fraction_samples_b_wins": 0.7216494845360825
+}

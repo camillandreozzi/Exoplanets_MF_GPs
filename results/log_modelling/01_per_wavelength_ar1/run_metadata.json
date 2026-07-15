@@ -1,0 +1,31 @@
+{
+  "command": "/Users/camillandreozzi/Documents/Claude/Projects/Semester Paper Multifidelity/Exoplanets_MF_GPs/.venv/bin/python -m research.log_modelling.01_per_wavelength_ar1",
+  "created_at_utc": "2026-07-09T05:05:00.798577+00:00",
+  "data_checksums_sha256": {
+    "data/Observed_Spectra.csv": "cbc60d45912bdafe54050a7f544bd42e6737a0a80ae30c9ad8ca95887681082a",
+    "data/XHF.csv": "5d242e78878aa39d7e30434cebe3bfe907507189aedf2feb3d6573e6a39cfc50",
+    "data/XLF_10k.csv": "7f16d1b9b365cae2d15a99ea9ac4eaa6d831eadd8de88a70a511ab7ee69a88e1",
+    "data/YHF.csv": "43f2cce1df81dcc096246903a903b0d57efd812a286c88e142f21d9cce4bc90b",
+    "data/YLF.csv": "3fe91d855aa84925aff08fe7e3acd96dddcd7f054d77584f18899f88669d9f02",
+    "data/YLF_10k.csv": "4ac2308263ba43077f61be39ff58af289c50fc18074dfd2a26f00f05ecafc6c6"
+  },
+  "git": {
+    "has_uncommitted_changes": true,
+    "revision": "504f84c52d3c8ae1cbbbaa09d8d40237ce2bfa84"
+  },
+  "packages": {
+    "matplotlib": "3.10.8",
+    "numpy": "2.4.4",
+    "pandas": "2.3.3",
+    "scikit-learn": "1.8.0",
+    "scipy": "1.17.1"
+  },
+  "platform": "macOS-26.3.1-arm64-arm-64bit-Mach-O",
+  "python": "3.14.3",
+  "random_seed": 0,
+  "scripts": [
+    "01_fit_joint_mf_gp.py",
+    "02_compare_rho_models.py"
+  ],
+  "workflow": "log_modelling/01_per_wavelength_ar1"
+}

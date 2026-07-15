@@ -1,0 +1,30 @@
+.DS_Store
+
+# Virtual environments
+.venv/
+
+# Python caches
+.cache/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+
+# Rebuildable workflow outputs
+results/exploratory/*
+!results/exploratory/.gitkeep
+
+results/reverse_label/*
+!results/reverse_label/.gitkeep
+
+results/modelling/*
+!results/modelling/.gitkeep
+
+results/log_modelling/*
+!results/log_modelling/.gitkeep
+
+results/validation/*
+!results/validation/.gitkeep
+
+# Large fitted models
+*.joblib

@@ -1,0 +1,11 @@
+{
+  "n_wavelengths": 195,
+  "n_lf_rows_available": 10000,
+  "n_lf_subsample": 400,
+  "n_hf_rows": 97,
+  "total_seconds": 1741.6,
+  "per_wavelength_mean_seconds": 8.931,
+  "per_wavelength_min_seconds": 4.652,
+  "per_wavelength_max_seconds": 16.191,
+  "seed": 0
+}
