@@ -9,15 +9,13 @@ correlation is also slightly higher on log scale).
 
 Conventions:
 
-- log10, not natural log — astronomy convention. The simulated spectra are
-  strictly positive, so the transform is exact (no clamping).
+- log10. The simulated spectra are strictly positive, so the transform is exact.
 - Every experiment here is a near-copy of its `research/modelling/`
   counterpart; the only diffs are the output directory
   (`results/log_modelling/`), the y transform after loading, and axis labels.
 - Model quantities fitted on log10 depths (rho, GP
   hyperparameters) are *different quantities* from their linear-scale
-  counterparts — e.g. a scaling rho on log depths corresponds to a power law
-  in linear units. Compare models across scales only through back-transformed
+  counterparts. Compare models across scales only through back-transformed
   predictions.
 
 ## Back-transforming predictions
