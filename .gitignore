@@ -26,5 +26,12 @@ results/log_modelling/*
 results/validation/*
 !results/validation/.gitkeep
 
+results/parameters/*
+!results/parameters/.gitkeep
+
 # Large fitted models
 *.joblib
+
+# Run logs (stdout dumps; belong under results/ or nowhere)
+*.log
+logs/

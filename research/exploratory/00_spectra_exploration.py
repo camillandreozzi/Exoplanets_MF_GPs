@@ -2,12 +2,38 @@
 
 import matplotlib.pyplot as plt
 import numpy as np
+from matplotlib.ticker import NullFormatter, ScalarFormatter
 
 from exoplanets_mf.data import load_all
 from exoplanets_mf.instruments import instrument_mode_masks
 from exoplanets_mf.paths import EXPLORATORY_RESULTS_DIR
 
 FIG_DIR = EXPLORATORY_RESULTS_DIR
+
+# Round wavelengths (µm) that make natural major ticks on a log axis; the
+# helper keeps only those inside the plotted range.
+_WAVELENGTH_TICKS = np.array(
+    [0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 30]
+)
+
+
+def set_log_wavelength_axis(ax, wl) -> None:
+    """Log-scale the wavelength x-axis with plain µm tick labels (not 10^x).
+
+    The standard emission-spectrum presentation: the wide µm range reads far
+    better on a log axis, but the labels stay original-scale numbers. Minor
+    ticks keep their marks but drop their labels to avoid clutter.
+    """
+    ax.set_xscale("log")
+    formatter = ScalarFormatter()
+    formatter.set_scientific(False)
+    ax.xaxis.set_major_formatter(formatter)
+    ax.xaxis.set_minor_formatter(NullFormatter())
+    ticks = _WAVELENGTH_TICKS[
+        (_WAVELENGTH_TICKS >= np.min(wl)) & (_WAVELENGTH_TICKS <= np.max(wl))
+    ]
+    if ticks.size:
+        ax.set_xticks(ticks)
 
 
 def _lf_band(ax, wl, YLF, color="tab:orange", band=(5, 95)):
@@ -28,6 +54,7 @@ def plot_hf_lf(wl, YHF, YLF, savepath):
     _lf_band(ax, wl, YLF)
     ax.plot(wl, YHF.T, color="tab:blue", alpha=0.15, lw=0.6)
     ax.plot(wl, YHF.mean(axis=0), color="tab:blue", lw=2, label="HF mean")
+    set_log_wavelength_axis(ax, wl)
     ax.set_xlabel("Wavelength [um]")
     ax.set_ylabel("Eclipse depth")
     ax.set_title("High- vs low-fidelity spectra")
@@ -57,6 +84,7 @@ def draw_hf_lf_observed(ax, wl, YHF, YLF, obs, *, ylabel="Eclipse depth",
         fmt="o", ms=3, color="black", ecolor="gray", elinewidth=0.8, capsize=2,
         label="Observed",
     )
+    set_log_wavelength_axis(ax, wl)
     ax.set_xlabel("Wavelength [um]")
     ax.set_ylabel(ylabel)
     ax.set_title(title)
@@ -159,6 +187,7 @@ def plot_correlation(wl, YHF, YLF, per_sample, per_wavelength, global_corr,
                  zorder=2)
     axes[1].scatter(wl, per_wavelength, s=18, color="tab:purple",
                     edgecolor="white", linewidth=0.4, zorder=3)
+    set_log_wavelength_axis(axes[1], wl)
     axes[1].set_xlabel("Wavelength [um]")
     axes[1].set_ylabel("Pearson r (HF vs LF) across samples")
     axes[1].set_title(f"Per-wavelength correlation\nglobal r = {global_corr:.3f}")

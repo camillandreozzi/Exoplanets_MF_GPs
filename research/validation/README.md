@@ -14,12 +14,9 @@ validation/
 │   ├── README.md
 │   ├── 01_fit_excluding_holdout.py
 │   └── 02_predict_and_evaluate.py
-├── 02_full_cv/
-│   ├── README.md
-│   └── 01_cv_joint_mf_gp.py
-└── 03_rho_loo_model_comparison/
+└── 02_full_cv/
     ├── README.md
-    └── 01_compare_rho_loo.py
+    └── 01_cv_joint_mf_gp.py
 ```
 
 A study's README should record its question, input data, configuration,

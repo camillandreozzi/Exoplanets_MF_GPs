@@ -1,11 +1,11 @@
 """Held-out spectrum overlay: actual vs every model's out-of-fold prediction.
 
 Plots one spectrum (default: spectrum 81, the historical holdout sample) as
-predicted by Models 1A, 1B, 1 joint, and 2 in the fold where it was held out,
-using the CV predictions saved by the Model 2 CV workflow. Top panel shows the
+predicted by Models 1A, 1B, and 2 in the fold where it was held out, using
+the CV predictions saved by the Model 2 CV workflow. Top panel shows the
 linear-scale fits, bottom panel the log10 fits back-transformed with
-``10**prediction``; shaded bands are 95% predictive intervals for the two GP
-models (the closed-form rho models have no predictive std in the archive).
+``10**prediction``; shaded bands are 95% predictive intervals (every model
+is a joint MF-GP with a predictive std in the archive).
 """
 
 from __future__ import annotations
@@ -16,9 +16,18 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 from exoplanets_mf.data import load_YHF
-from exoplanets_mf.paths import MODELLING_RESULTS_DIR, VALIDATION_RESULTS_DIR
+from exoplanets_mf.paths import (
+    LOG_MODELLING_RESULTS_DIR,
+    MODELLING_RESULTS_DIR,
+    VALIDATION_RESULTS_DIR,
+)
 
-CV_DIR = MODELLING_RESULTS_DIR / "02_augmented_wavelength" / "cv"
+CV_DIRS = {
+    "linear": MODELLING_RESULTS_DIR / "02_augmented_wavelength" / "cv" / "linear",
+    "log10": (
+        LOG_MODELLING_RESULTS_DIR / "02_augmented_wavelength" / "cv" / "log10"
+    ),
+}
 OUTPUT_DIR = VALIDATION_RESULTS_DIR / "04_stats101_summary"
 
 SPECTRUM_LABEL = "spectrum 81"
@@ -26,23 +35,21 @@ SPECTRUM_LABEL = "spectrum 81"
 MODEL_SHORT_LABELS = {
     "model_1a": "Model 1A",
     "model_1b": "Model 1B",
-    "model_1_joint": "Model 1 joint",
     "model_2": "Model 2",
 }
 MODEL_COLORS = {
     "model_1a": "#2a78d6",
     "model_1b": "#1baf7a",
-    "model_1_joint": "#eda100",
     "model_2": "#008300",
 }
-GP_MODELS = ("model_1_joint", "model_2")
+GP_MODELS = ("model_1a", "model_1b", "model_2")
 
 
 def load_cv_predictions(scale: str) -> dict[str, np.ndarray]:
-    path = CV_DIR / scale / "cv_predictions.npz"
+    path = CV_DIRS[scale] / "cv_predictions.npz"
     if not path.exists():
         raise FileNotFoundError(
-            f"{path} not found. Run `make model2` first to generate the "
+            f"{path} not found. Run `make modelling_sklearn` first to generate the "
             "out-of-fold CV predictions this plot reuses."
         )
     with np.load(path) as archive:

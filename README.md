@@ -11,13 +11,16 @@ spectra and developing multifidelity Gaussian-process models.
 ├── research/
 │   ├── exploratory/         # numbered exploratory workflows
 │   ├── reverse_label/       # inverse spectrum-to-parameter diagnostics
-│   ├── modelling/           # model experiments and evaluations
+│   ├── modelling/           # model experiments (linear + log10 spectra)
+│   ├── parameters/          # fitted-hyperparameter visualisations
 │   └── validation/          # predictive-performance validation studies
 ├── src/exoplanets_mf/       # reusable loaders, paths, and shared code
 ├── results/
 │   ├── exploratory/         # generated exploratory artifacts
 │   ├── reverse_label/       # generated inverse-diagnostic artifacts
-│   ├── modelling/           # generated model artifacts
+│   ├── modelling/           # generated model artifacts (linear spectra)
+│   ├── log_modelling/       # generated model artifacts (log10 spectra)
+│   ├── parameters/          # generated hyperparameter figures/tables
 │   └── validation/          # generated validation artifacts
 ├── tests/                   # data and code integrity checks
 ├── pyproject.toml           # installable project metadata
@@ -29,48 +32,67 @@ The split is deliberate: `research/` answers scientific questions, while
 stages can be added as sibling folders without turning `src/` into a collection
 of one-off scripts.
 
-## Reproduce the environment
+## Reproduce outputs
 
-Python 3.14.3 and all runtime packages are pinned. From the repository root:
+Python 3.14.3 and all runtime packages are pinned. From the repository root,
+create the isolated environment first:
 
 ```bash
 make setup
-make data-check
-make verify
 ```
 
-`make setup` creates an isolated `.venv`; it does not modify the system Python
-environment. The checksum step verifies that the input bytes match the dataset
-used for the analyses.
+`make setup` creates `.venv`, installs `requirements.lock`, and vendors the
+OpenMP runtime needed by the GPBoost wheel on macOS. It does not modify the
+system Python environment.
 
-## Run the research workflows
-
-Run the complete exploratory sequence:
+Use the canonical pipeline targets to produce outputs:
 
 ```bash
-make exploratory
+make check
+make diagnostics
+make models
+make validation
+make reports
 ```
 
-Run the reverse-label sensitivity diagnostic, which treats spectral channels as
-predictors and physical parameters as outputs:
+The same routine paper and diagnostic outputs can be produced in one command:
 
 ```bash
-make reverse-label
+make reproduce
 ```
 
-Run the model-fitting pipelines (linear and log10-transformed spectra) and
-the validation studies with:
+`make reproduce` verifies the input checksums and tests, writes exploratory and
+reverse-label diagnostics, fits the linear and log10 model families, runs the
+matched GPBoost comparison, produces validation summaries, and generates fitted
+hyperparameter reports.
+
+The slower max-data GPBoost comparison is intentionally outside the default
+pipeline. Produce it together with the routine outputs when needed:
 
 ```bash
-make modelling      # cost benchmark, joint MF-GP fit, model 1A vs 1B CV
-make model2         # wavelength-augmented joint MF-GP: benchmark, fits, CV vs Model 1
-make log-modelling  # same pipeline on log10-transformed spectra
-make validation     # sample-81-only holdout study
-make rho-loo-validation  # all-97 LOO for Model 1A/1B, log, and log-vs-linear
-make full-cv        # 5-fold CV of the joint MF-GP over all 97 HF samples
+make reproduce-heavy
 ```
 
-Or run one workflow:
+The main result sets are written to:
+
+1. `results/exploratory/` and `results/reverse_label/` for diagnostics.
+2. `results/modelling/02_augmented_wavelength/cv/` and
+   `results/log_modelling/02_augmented_wavelength/cv/` for sklearn/custom-kernel
+   model comparisons.
+3. `results/modelling/03_gpboost_comparison/matched_subsample/` for the matched
+   GPBoost comparison.
+4. `results/validation/` for holdout, full-CV, and Stats101 summaries.
+5. `results/parameters/` for fitted-hyperparameter figures and tables.
+6. `results/modelling/03_gpboost_comparison/max_data/` for the optional heavy
+   GPBoost comparison.
+
+To inspect the available commands:
+
+```bash
+make help
+```
+
+Or run one workflow directly:
 
 ```bash
 PYTHONPATH=src MPLBACKEND=Agg .venv/bin/python \
@@ -83,9 +105,6 @@ use the shared seed in `src/exoplanets_mf/reproducibility.py`. A complete run
 also writes `run_metadata.json` with the Git revision, data checksums,
 environment versions, platform, and seed used for that result.
 
-The existing top-level `figures/` directory contains historical outputs from
-before this structure was introduced. New runs do not modify it.
-
 ## Add a new analysis or model
 
 - Put one-off scientific orchestration in the appropriate `research/` folder.
@@ -94,4 +113,4 @@ before this structure was introduced. New runs do not modify it.
 - Write generated files to the matching `results/` folder.
 - Record parameters, seed, evaluation protocol, and expected outputs in the
   workflow or experiment README.
-- Add tests for shared logic and run `make verify` before committing.
+- Add tests for shared logic and run `make check` before committing.

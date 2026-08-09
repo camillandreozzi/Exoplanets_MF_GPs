@@ -2,7 +2,7 @@
 
 ## Question
 
-How do Models 1A, 1B, 1 joint, and 2 compare in plain introductory statistics
+How do Models 1A, 1B, and 2 (all joint MF-GPs) compare in plain introductory statistics
 (R^2, Pearson r, MAE, RMSE, bias) on linear and log10 scales, with everything
 in one table and two simple figures?
 
@@ -10,7 +10,8 @@ in one table and two simple figures?
 
 `01_stats101_summary.py` refits nothing. It reuses the out-of-fold predictions
 saved by `research/modelling/02_augmented_wavelength/02_cv_model2_vs_model1.py`
-(`results/modelling/02_augmented_wavelength/cv/{linear,log10}/cv_predictions.npz`,
+(`results/modelling/02_augmented_wavelength/cv/linear/cv_predictions.npz` and
+`results/log_modelling/02_augmented_wavelength/cv/log10/cv_predictions.npz`,
 one shared 5-fold CV over the 97 paired HF samples) and computes pooled
 statistics for three scale views:
 
@@ -35,7 +36,8 @@ or:
 make stats101
 ```
 
-Requires `make model2` to have been run first (it produces the CV predictions).
+Requires `make modelling_sklearn` to have been run first (it produces the CV
+predictions).
 
 ## Expected outputs
 

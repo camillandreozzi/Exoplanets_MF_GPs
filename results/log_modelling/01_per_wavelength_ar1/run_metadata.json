@@ -1,6 +1,6 @@
 {
   "command": "/Users/camillandreozzi/Documents/Claude/Projects/Semester Paper Multifidelity/Exoplanets_MF_GPs/.venv/bin/python -m research.log_modelling.01_per_wavelength_ar1",
-  "created_at_utc": "2026-07-09T05:05:00.798577+00:00",
+  "created_at_utc": "2026-07-15T17:45:24.382479+00:00",
   "data_checksums_sha256": {
     "data/Observed_Spectra.csv": "cbc60d45912bdafe54050a7f544bd42e6737a0a80ae30c9ad8ca95887681082a",
     "data/XHF.csv": "5d242e78878aa39d7e30434cebe3bfe907507189aedf2feb3d6573e6a39cfc50",
@@ -11,7 +11,7 @@
   },
   "git": {
     "has_uncommitted_changes": true,
-    "revision": "504f84c52d3c8ae1cbbbaa09d8d40237ce2bfa84"
+    "revision": "124214bb17830439648810a4dd2a4cc335138b86"
   },
   "packages": {
     "matplotlib": "3.10.8",
@@ -24,8 +24,9 @@
   "python": "3.14.3",
   "random_seed": 0,
   "scripts": [
-    "01_fit_joint_mf_gp.py",
-    "02_compare_rho_models.py"
+    "01_fit_model1b.py (layer reused from prior run, relabeled from 01_fit_joint_mf_gp.py; not refitted)",
+    "02_fit_model1a.py",
+    "03_compare_model1a_vs_1b.py"
   ],
   "workflow": "log_modelling/01_per_wavelength_ar1"
 }

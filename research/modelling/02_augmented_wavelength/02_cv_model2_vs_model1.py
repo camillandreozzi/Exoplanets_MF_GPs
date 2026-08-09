@@ -1,20 +1,23 @@
-"""5-fold CV of Model 2 against the Model 1 baselines, linear and log10.
+"""5-fold CV of Model 2 against the Model 1 MF-GP baselines, linear and log10.
 
 Every comparison is paired: all models share the identical KFold assignment
 (same n_samples, n_splits, seed), verified before any metric is computed.
 Whole HF spectra are held out per fold; LF data is always fully eligible --
 only HF availability is validated (same protocol as validation/02_full_cv).
+Every model is a joint multi-fidelity GP and predicts the held-out HF
+spectra from atmospheric inputs alone.
 
-Baselines per output scale:
+All models -- Model 2 and both Model 1 baselines -- draw the one canonical LF
+subsample (reproducibility.LF_SUBSAMPLE_SIZE), so they train on the identical
+LF rows. Baselines per output scale (per-wavelength joint AR(1) MF-GP layers):
 
-- Model 1A / 1B: closed-form rho layers (instant refits).
-- Model 1 joint GP (optional): the per-wavelength joint AR(1) MF-GP at its
-  200-LF TESTING configuration -- the same caveat as validation/02_full_cv:
-  this is NOT Model 1's production size, so read its rows as indicative.
+- Model 1A: one shared rho against the summed marginal likelihood.
+- Model 1B: one free rho_j per wavelength.
 
-Model 2 uses a reduced CV configuration relative to 01_fit_model2.py because
-every fold refits the joint GP from scratch (5 folds x 2 scales); see
-benchmark/model2_fit_benchmark.json (recommended_cv_lf_sample_size).
+Model 2's augmented design costs lf_sample_size x n_wavelengths per fold, so
+its wavelength stride is derived from a tighter CV point budget than the
+production fit (every fold refits the joint GP from scratch, 5 folds x 2
+scales); see model2.derive_lambda_stride and MODEL2_CV_MAX_AUGMENTED_POINTS.
 
 A final section compares Model 2 fitted on log10 spectra against Model 2
 fitted on linear spectra, after back-transforming the log10 held-out
@@ -38,42 +41,40 @@ from exoplanets_mf.cv import (
     CVPredictions,
     compare_cv,
     cv_metrics,
-    cv_predict,
-    cv_predict_rho_model,
+    cv_predict_hf_only_gp,
+    cv_predict_joint_mf_gp,
 )
 from exoplanets_mf.data import load_all
 from exoplanets_mf.instruments import instrument_mode_masks
-from exoplanets_mf.mf_gp import fit_joint_mf_gp, predict_hf
-from exoplanets_mf.model2 import cv_predict_model2
-from exoplanets_mf.paths import MODELLING_RESULTS_DIR
-from exoplanets_mf.reproducibility import RANDOM_SEED
+from exoplanets_mf.model2 import (
+    MODEL2_CV_MAX_AUGMENTED_POINTS,
+    cv_predict_model2,
+    derive_lambda_stride,
+)
+from exoplanets_mf.paths import LOG_MODELLING_RESULTS_DIR, MODELLING_RESULTS_DIR
+from exoplanets_mf.reproducibility import LF_SUBSAMPLE_SIZE, RANDOM_SEED
 from exoplanets_mf.transforms import inverse_log10_spectra, log10_spectra
 
 OUTPUT_DIR = MODELLING_RESULTS_DIR / "02_augmented_wavelength" / "cv"
+LOG_OUTPUT_DIR = LOG_MODELLING_RESULTS_DIR / "02_augmented_wavelength" / "cv"
 
 SEED = RANDOM_SEED
 N_SPLITS = CV_FULL_MODEL_SPLITS  # each fold refits the full joint GP
-# CV runs at a coarser wavelength stride than the production fit because
-# every fold refits the joint GP from scratch (5 folds x 2 scales): stride
-# 13 keeps 15 HF + 15 offset LF wavelengths -> n = 97*15 + 40*15 = 2055
-# points, ~6-7 min per fold (~65 min for both scales) by cubic
-# extrapolation from the benchmark anchor (n=2955 ~ 19 min). At the
-# production stride 8 the benchmark instead recommends lf_sample_size 40
-# (n=3385, ~28 min per fold, ~4.7 h total) -- see
-# benchmark/model2_fit_benchmark.json (recommended_cv_lf_sample_size).
-LAMBDA_STRIDE = 13
-CV_LF_SAMPLE_SIZE = 40
-# The joint per-wavelength Model 1 baseline refits 195 GPs per fold; 200 LF
-# rows is its TESTING config (~2 s/wavelength, ~30-40 min for 5 folds per
-# scale) -- identical to validation/02_full_cv's caveat.
-INCLUDE_MODEL1_JOINT = True
-MODEL1_JOINT_SUBSAMPLE_SIZE = 200
+# Every model and CV share the one canonical LF subsample (see
+# reproducibility.LF_SUBSAMPLE_SIZE): Model 2 and the Model 1 baselines draw
+# the identical LF rows. Because Model 2's augmented design costs
+# lf_sample_size x n_wavelengths per fold (refit 5 folds x 2 scales), its
+# wavelength stride is derived from the tighter CV point budget (in main, once
+# the data shape is known) rather than pinned.
+CV_LF_SAMPLE_SIZE = LF_SUBSAMPLE_SIZE
+MODEL1_CV_SUBSAMPLE_SIZE = LF_SUBSAMPLE_SIZE
+LAMBDA_STRIDE: int | None = None  # assigned in main() via derive_lambda_stride
 
 CI_Z = stats.norm.ppf(0.975)
 MODEL_LABELS = {
-    "model_1a": "Model 1A (global rho)",
-    "model_1b": "Model 1B (per-wavelength rho)",
-    "model_1_joint": f"Model 1 joint GP ({MODEL1_JOINT_SUBSAMPLE_SIZE}-LF testing config)",
+    "hf_only": "HF-only GP (single-fidelity baseline)",
+    "model_1a": "Model 1A (global-rho MF-GP)",
+    "model_1b": "Model 1B (per-wavelength-rho MF-GP)",
     "model_2": "Model 2 (wavelength-augmented joint MF-GP)",
 }
 
@@ -115,37 +116,31 @@ def scale_predictions(
     YLF_10k: np.ndarray,
     XHF: np.ndarray,
     YHF: np.ndarray,
-    YLF_paired: np.ndarray,
     wavelengths: np.ndarray,
     *,
     scale_label: str,
 ) -> dict[str, CVPredictions]:
     """All models' out-of-fold predictions on one output scale."""
-    predictions = {
-        "model_1a": cv_predict_rho_model(
-            YHF, YLF_paired, per_wavelength=False, n_splits=N_SPLITS, seed=SEED
-        ),
-        "model_1b": cv_predict_rho_model(
-            YHF, YLF_paired, per_wavelength=True, n_splits=N_SPLITS, seed=SEED
-        ),
-    }
+    predictions = {}
+    print(f"  [{scale_label}] {MODEL_LABELS['hf_only']} CV ...", flush=True)
+    predictions["hf_only"] = cv_predict_hf_only_gp(
+        XHF,
+        YHF,
+        wavelengths,
+        n_splits=N_SPLITS,
+        seed=SEED,
+    )
 
-    if INCLUDE_MODEL1_JOINT:
-        print(f"  [{scale_label}] Model 1 joint GP CV ...", flush=True)
-        predictions["model_1_joint"] = cv_predict(
-            fit_fn=lambda train_idx: fit_joint_mf_gp(
-                XLF_10k,
-                YLF_10k,
-                XHF[train_idx],
-                YHF[train_idx],
-                wavelengths,
-                seed=SEED,
-                subsample_size=MODEL1_JOINT_SUBSAMPLE_SIZE,
-                progress_every=100,
-            ),
-            predict_fn=lambda layer, test_idx: predict_hf(layer, XHF[test_idx]),
-            n_samples=YHF.shape[0],
-            n_wavelengths=YHF.shape[1],
+    for key, per_wavelength in (("model_1a", False), ("model_1b", True)):
+        print(f"  [{scale_label}] {MODEL_LABELS[key]} CV ...", flush=True)
+        predictions[key] = cv_predict_joint_mf_gp(
+            XLF_10k,
+            YLF_10k,
+            XHF,
+            YHF,
+            wavelengths,
+            per_wavelength_rho=per_wavelength,
+            subsample_size=MODEL1_CV_SUBSAMPLE_SIZE,
             n_splits=N_SPLITS,
             seed=SEED,
         )
@@ -197,11 +192,11 @@ def plot_scale_diagnostics(
 ) -> None:
     fig, axes = plt.subplots(2, 2, figsize=(13, 9))
     metric_lines = [
+        ("hf_only", "tab:gray"),
+        ("model_1a", "tab:green"),
         ("model_1b", "tab:blue"),
         ("model_2", "tab:red"),
     ]
-    if "model_1_joint" in predictions:
-        metric_lines.insert(1, ("model_1_joint", "tab:green"))
 
     ax = axes[0, 0]
     shade_instrument_modes(ax, wavelengths)
@@ -423,11 +418,10 @@ def write_scale_report(
         for key, value in coverage.items()
     )
     caveat = (
-        f"- The Model 1 joint GP baseline runs at its {MODEL1_JOINT_SUBSAMPLE_SIZE}-LF "
-        "TESTING configuration (validation/02_full_cv's caveat applies): its row is "
-        "indicative, not Model 1's production accuracy.\n"
-        if "model_1_joint" in comparisons
-        else ""
+        f"- All models draw the one canonical LF subsample "
+        f"({MODEL1_CV_SUBSAMPLE_SIZE} LF rows, shared by every model and CV), so "
+        "the Model 1A/1B baselines run at the same LF configuration as their "
+        "production fits.\n"
     )
     report = f"""# CV Report: Model 2 vs Model 1 baselines ({output_units})
 
@@ -566,8 +560,9 @@ def write_combined_report(
 
 {N_SPLITS}-fold cross-validation over all 97 paired HF samples, seed `{SEED}`,
 identical fold assignment for every model. Model 2 fits ONE joint MF-GP over
-z = (theta, lambda) with a single scalar rho; Model 1 fits 195 independent
-per-wavelength models.
+z = (theta, lambda) with a single scalar rho; Model 1 fits 195 per-wavelength
+joint MF-GPs (1A: one shared rho, 1B: one free rho_j per wavelength). Every
+model predicts held-out HF spectra from atmospheric inputs alone.
 
 ## Main Results
 
@@ -579,17 +574,22 @@ Negative deltas mean Model 2 (or the log10 variant in the last row) wins.
 
 ## Technical Notes
 
-- Model 2 CV configuration: {CV_LF_SAMPLE_SIZE} LF samples, wavelength stride {LAMBDA_STRIDE} (reduced vs the production fit; every fold refits the joint GP from scratch).
-- Model 1 joint GP baseline (if present) runs at its {MODEL1_JOINT_SUBSAMPLE_SIZE}-LF TESTING configuration.
-- Model 1A/1B closed-form baselines consume the paired LF spectrum of the held-out sample at prediction time; Model 2 and the Model 1 joint GP predict from atmospheric inputs alone. Model 1A/1B therefore have strictly more information per test sample -- keep that in mind when reading the deltas.
+- Model 2 CV configuration: {CV_LF_SAMPLE_SIZE} LF samples (the shared canonical subsample), wavelength stride {LAMBDA_STRIDE} (coarser than the production fit; every fold refits the joint GP from scratch).
+- Model 1A/1B MF-GP baselines draw the same {MODEL1_CV_SUBSAMPLE_SIZE}-LF canonical subsample -- identical rows to Model 2 and to their production fits.
+- Every model predicts the held-out HF spectra from atmospheric inputs alone; no model consumes the paired LF spectrum of a test sample.
 - Log10 predictions are back-transformed with `10**mu` (implied log-normal median) before comparison in original units.
-- Detailed per-scale reports: `linear/CV_REPORT.md`, `log10/CV_REPORT.md`; scale contrast in `log_vs_linear/`.
+- Detailed per-scale reports: `linear/CV_REPORT.md` and
+  `results/log_modelling/02_augmented_wavelength/cv/log10/CV_REPORT.md`;
+  scale contrast in
+  `results/log_modelling/02_augmented_wavelength/cv/log_vs_linear/`.
 """
     savepath.write_text(report)
 
 
 def main() -> None:
+    global LAMBDA_STRIDE
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    LOG_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     data = load_all()
     wavelengths = data["wavelengths"]
     sample_labels = data["YHF"].index.to_numpy()
@@ -597,15 +597,23 @@ def main() -> None:
     YLF_10k = data["YLF_10k"].to_numpy()
     XHF = data["XHF"].to_numpy()
     YHF_linear = data["YHF"].to_numpy()
-    YLF_paired_linear = data["YLF"].to_numpy()
+
+    # Finest wavelength grid whose per-fold augmented design stays within the
+    # CV runtime budget, for the shared LF subsample size.
+    LAMBDA_STRIDE = derive_lambda_stride(
+        CV_LF_SAMPLE_SIZE,
+        len(XHF),
+        len(wavelengths),
+        max_points=MODEL2_CV_MAX_AUGMENTED_POINTS,
+    )
 
     print(
         f"{N_SPLITS}-fold CV of Model 2 (lf={CV_LF_SAMPLE_SIZE}, "
-        f"stride={LAMBDA_STRIDE}) vs Model 1 baselines "
-        f"(joint baseline: {INCLUDE_MODEL1_JOINT}), seed={SEED}"
+        f"stride={LAMBDA_STRIDE}) vs Model 1A/1B MF-GP baselines "
+        f"({MODEL1_CV_SUBSAMPLE_SIZE}-LF shared subsample), seed={SEED}"
     )
     linear_predictions = scale_predictions(
-        XLF_10k, YLF_10k, XHF, YHF_linear, YLF_paired_linear, wavelengths,
+        XLF_10k, YLF_10k, XHF, YHF_linear, wavelengths,
         scale_label="linear",
     )
     log_predictions = scale_predictions(
@@ -613,7 +621,6 @@ def main() -> None:
         log10_spectra(YLF_10k),
         XHF,
         log10_spectra(YHF_linear),
-        log10_spectra(YLF_paired_linear),
         wavelengths,
         scale_label="log10",
     )
@@ -628,7 +635,7 @@ def main() -> None:
         actual_label="actual HF eclipse depth",
     )
     log_comparisons = write_scale_outputs(
-        OUTPUT_DIR / "log10",
+        LOG_OUTPUT_DIR / "log10",
         wavelengths,
         sample_labels,
         log10_spectra(YHF_linear),
@@ -641,7 +648,7 @@ def main() -> None:
         inverse_log10_spectra(log_predictions["model_2"].y_pred), y_std=None
     )
     scale_comparison = write_log_vs_linear_outputs(
-        OUTPUT_DIR / "log_vs_linear",
+        LOG_OUTPUT_DIR / "log_vs_linear",
         wavelengths,
         sample_labels,
         YHF_linear,
@@ -669,7 +676,8 @@ def main() -> None:
         "linear-units log-vs-linear delta RMSE (log - linear): "
         f"{scale_comparison.delta_rmse_pooled:+.4e}"
     )
-    print(f"outputs written to {OUTPUT_DIR}")
+    print(f"linear outputs written to {OUTPUT_DIR}")
+    print(f"log outputs written to {LOG_OUTPUT_DIR}")
 
 
 if __name__ == "__main__":

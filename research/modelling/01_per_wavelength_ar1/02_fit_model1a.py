@@ -9,6 +9,10 @@ exoplanets_mf.mf_gp.fit_joint_mf_gp_global_rho).
 The fit warm-starts from the saved Model 1B layer when it exists -- SAME
 SUBSAMPLE_SIZE and seed required, enforced by the fitter -- which only
 changes the starting point, not the criterion.
+
+Both fidelity scales are fit from one run (linear and log10 spectra), each
+warm-starting from and writing to its own results root; the log10 fit lives
+in log10 space (see the README for back-transforming predictions).
 """
 
 import json
@@ -22,20 +26,33 @@ from exoplanets_mf.mf_gp import (
     fit_joint_mf_gp_global_rho,
     hyperparameter_table,
 )
-from exoplanets_mf.paths import MODELLING_RESULTS_DIR
-from exoplanets_mf.reproducibility import RANDOM_SEED
+from exoplanets_mf.paths import LOG_MODELLING_RESULTS_DIR, MODELLING_RESULTS_DIR
+from exoplanets_mf.reproducibility import LF_SUBSAMPLE_SIZE, RANDOM_SEED
+from exoplanets_mf.transforms import log10_spectra
 
-MODEL_1B_DIR = MODELLING_RESULTS_DIR / "01_per_wavelength_ar1" / "model_1b"
-OUTPUT_DIR = MODELLING_RESULTS_DIR / "01_per_wavelength_ar1" / "model_1a"
-
-# Must match 01_fit_model1b.py for the shared LF subsample (and the warm
-# start); see that script for the TESTING-vs-production sizing discussion.
-SUBSAMPLE_SIZE = 400
+# The one canonical LF subsample shared by every model (see
+# reproducibility.LF_SUBSAMPLE_SIZE); matches 01_fit_model1b.py for the shared
+# subsample and the warm start.
+SUBSAMPLE_SIZE = LF_SUBSAMPLE_SIZE
 SEED = RANDOM_SEED
 
+# (name, results root, y transform, print phrase, plot-title suffix).
+SCALES = (
+    ("linear", MODELLING_RESULTS_DIR, None, "", ""),
+    (
+        "log10",
+        LOG_MODELLING_RESULTS_DIR,
+        log10_spectra,
+        ", log10 spectra",
+        ", log10 spectra",
+    ),
+)
 
-def load_warm_start_layer():
-    layer_path = MODEL_1B_DIR / "model_1b_layer.joblib"
+
+def load_warm_start_layer(results_root):
+    layer_path = (
+        results_root / "01_per_wavelength_ar1" / "model_1b" / "model_1b_layer.joblib"
+    )
     if layer_path.exists():
         print(f"warm-starting from {layer_path}")
         return joblib.load(layer_path)
@@ -43,7 +60,7 @@ def load_warm_start_layer():
     return None
 
 
-def plot_diagnostics(table, sweeps, savepath) -> None:
+def plot_diagnostics(table, sweeps, savepath, title_suffix="") -> None:
     fig, ax = plt.subplots(1, 4, figsize=(20, 4))
     ax[0].plot(
         [sweep["sweep"] for sweep in sweeps],
@@ -53,7 +70,10 @@ def plot_diagnostics(table, sweeps, savepath) -> None:
     ax[0].set(
         xlabel="block-coordinate sweep",
         ylabel=r"shared $\rho$",
-        title=f"Model 1A global scaling (final = {table['rho'].iloc[0]:.4f})",
+        title=(
+            f"Model 1A global scaling{title_suffix} "
+            f"(final = {table['rho'].iloc[0]:.4f})"
+        ),
     )
     ax[1].plot(
         [sweep["sweep"] for sweep in sweeps],
@@ -77,7 +97,7 @@ def plot_diagnostics(table, sweeps, savepath) -> None:
     ax[2].set(
         xlabel=r"wavelength $\lambda$ [$\mu$m]",
         ylabel="signal variance",
-        title="Joint covariance components",
+        title=f"Joint covariance components{title_suffix}",
     )
     ax[2].legend()
     ax[3].plot(
@@ -93,17 +113,20 @@ def plot_diagnostics(table, sweeps, savepath) -> None:
     plt.close(fig)
 
 
-def main():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    data = load_all()
+def run_pass(data, results_root, y_transform, phrase, title_suffix) -> None:
+    output_dir = results_root / "01_per_wavelength_ar1" / "model_1a"
+    output_dir.mkdir(parents=True, exist_ok=True)
     XLF_10k = data["XLF_10k"].to_numpy()
-    YLF_10k = data["YLF_10k"].to_numpy()
     XHF = data["XHF"].to_numpy()
+    YLF_10k = data["YLF_10k"].to_numpy()
     YHF = data["YHF"].to_numpy()
+    if y_transform is not None:
+        YLF_10k = y_transform(YLF_10k)
+        YHF = y_transform(YHF)
     wavelengths = data["wavelengths"]
 
     print(
-        f"Fitting Model 1A (global-rho MF-GPs): {len(wavelengths)} "
+        f"Fitting Model 1A (global-rho MF-GPs{phrase}): {len(wavelengths)} "
         f"wavelengths, {SUBSAMPLE_SIZE} of {len(XLF_10k)} LF + {len(XHF)} HF "
         "rows per fit, one shared rho"
     )
@@ -116,7 +139,7 @@ def main():
         wavelengths,
         seed=SEED,
         subsample_size=SUBSAMPLE_SIZE,
-        warm_start_layer=load_warm_start_layer(),
+        warm_start_layer=load_warm_start_layer(results_root),
         progress_every=40,
     )
     elapsed = time.perf_counter() - t0
@@ -132,10 +155,10 @@ def main():
         f"{table['joint_log_marginal_likelihood'].sum():.2f}"
     )
 
-    table.to_csv(OUTPUT_DIR / "model_1a_hyperparameters.csv", index=False)
-    joblib.dump(layer, OUTPUT_DIR / "model_1a_layer.joblib")
-    plot_diagnostics(table, sweeps, OUTPUT_DIR / "02_model1a_diagnostics.png")
-    (OUTPUT_DIR / "timing_summary.json").write_text(
+    table.to_csv(output_dir / "model_1a_hyperparameters.csv", index=False)
+    joblib.dump(layer, output_dir / "model_1a_layer.joblib")
+    plot_diagnostics(table, sweeps, output_dir / "02_model1a_diagnostics.png", title_suffix)
+    (output_dir / "timing_summary.json").write_text(
         json.dumps(
             {
                 "n_wavelengths": len(wavelengths),
@@ -151,7 +174,13 @@ def main():
             indent=2,
         )
     )
-    print(f"outputs written to {OUTPUT_DIR}")
+    print(f"outputs written to {output_dir}")
+
+
+def main():
+    data = load_all()
+    for _name, results_root, y_transform, phrase, title_suffix in SCALES:
+        run_pass(data, results_root, y_transform, phrase, title_suffix)
 
 
 if __name__ == "__main__":

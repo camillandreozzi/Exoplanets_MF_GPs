@@ -27,6 +27,7 @@ from typing import Callable
 import numpy as np
 from sklearn.model_selection import KFold
 
+from exoplanets_mf.hf_only_gp import fit_hf_only_gp, predict_hf_only
 from exoplanets_mf.mf_gp import (
     fit_joint_mf_gp,
     fit_joint_mf_gp_global_rho,
@@ -248,6 +249,41 @@ def cv_predict_joint_mf_gp(
     return cv_predict(
         fit_fn=fit_fold,
         predict_fn=lambda layer, test_idx: predict_hf(layer, X_hf[test_idx]),
+        n_samples=Y_hf.shape[0],
+        n_wavelengths=Y_hf.shape[1],
+        n_splits=n_splits,
+        seed=seed,
+    )
+
+
+def cv_predict_hf_only_gp(
+    X_hf: np.ndarray,
+    Y_hf: np.ndarray,
+    wavelengths: np.ndarray,
+    *,
+    n_splits: int = CV_FULL_MODEL_SPLITS,
+    seed: int,
+    progress_every: int | None = None,
+) -> CVPredictions:
+    """Out-of-fold HF predictions of the single-fidelity (HF-only) GP baseline.
+
+    Every fold refits one plain SE-ARD GP per wavelength on the training HF
+    rows alone -- the low-fidelity design is never used -- and predicts the
+    held-out HF spectra from atmospheric inputs. This is the single-fidelity
+    floor the joint MF-GPs are measured against, not a competing MF model.
+    """
+    def fit_fold(train_idx: np.ndarray):
+        return fit_hf_only_gp(
+            X_hf[train_idx],
+            Y_hf[train_idx],
+            wavelengths,
+            seed=seed,
+            progress_every=progress_every,
+        )
+
+    return cv_predict(
+        fit_fn=fit_fold,
+        predict_fn=lambda layer, test_idx: predict_hf_only(layer, X_hf[test_idx]),
         n_samples=Y_hf.shape[0],
         n_wavelengths=Y_hf.shape[1],
         n_splits=n_splits,

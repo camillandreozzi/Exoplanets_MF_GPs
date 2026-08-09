@@ -1,6 +1,6 @@
 {
-  "command": "/Library/Frameworks/Python.framework/Versions/3.14/bin/python3 -m research.validation.01_loo_holdout_validation",
-  "created_at_utc": "2026-07-02T07:03:22.206549+00:00",
+  "command": "/Users/camillandreozzi/Documents/Claude/Projects/Semester Paper Multifidelity/Exoplanets_MF_GPs/.venv/bin/python -m research.validation.01_loo_holdout_validation",
+  "created_at_utc": "2026-07-16T04:39:56.714538+00:00",
   "data_checksums_sha256": {
     "data/Observed_Spectra.csv": "cbc60d45912bdafe54050a7f544bd42e6737a0a80ae30c9ad8ca95887681082a",
     "data/XHF.csv": "5d242e78878aa39d7e30434cebe3bfe907507189aedf2feb3d6573e6a39cfc50",
@@ -11,7 +11,7 @@
   },
   "git": {
     "has_uncommitted_changes": true,
-    "revision": "504f84c52d3c8ae1cbbbaa09d8d40237ce2bfa84"
+    "revision": "124214bb17830439648810a4dd2a4cc335138b86"
   },
   "packages": {
     "matplotlib": "3.10.8",

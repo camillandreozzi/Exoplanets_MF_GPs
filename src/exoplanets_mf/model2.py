@@ -24,7 +24,7 @@ exoplanets_mf.cv engine unchanged.
 
 Outputs are standardized per wavelength by LF column moments before
 flattening (the single-GP analog of Model 1's per-wavelength
-``normalize_y=True`` and of standardized_lf_and_hf_residuals): it removes
+``normalize_y=True``): it removes
 the orders-of-magnitude heteroscedasticity across wavelengths that would
 otherwise break the stationary lambda kernel, uses no HF information (no CV
 fold leakage), and leaves rho invariant (a common per-column scale on both
@@ -80,6 +80,48 @@ def select_wavelength_subgrid(
             f"stride={stride}"
         )
     return np.arange(offset, n_wavelengths, stride)
+
+
+# Augmented-design point budgets. Since the shared LF subsample is fixed at
+# LF_SUBSAMPLE_SIZE (200) rows -- much larger than Model 2's old bespoke count --
+# the wavelength stride is derived from these budgets rather than pinned, so the
+# design stays within the measured runtime envelope (benchmark anchor n=2955
+# fitted in ~19 min; see 00_benchmark_model2_fit.py). Production tolerates a
+# single fit; CV refits every fold (5 folds x 2 scales) and so uses a tighter
+# budget.
+MODEL2_MAX_AUGMENTED_POINTS = 3400
+MODEL2_CV_MAX_AUGMENTED_POINTS = 2100
+
+
+def derive_lambda_stride(
+    n_lf_samples: int,
+    n_hf_samples: int,
+    n_wavelengths: int,
+    *,
+    max_points: int,
+) -> int:
+    """Smallest wavelength stride keeping the augmented design within budget.
+
+    The augmented design has ``n_lf_samples * n_lf_lambda + n_hf_samples *
+    n_hf_lambda`` scalar rows, where the LF wavelengths sit on a half-stride
+    offset subgrid (matching fit_model2). Returns the smallest stride whose
+    total point count is <= ``max_points`` -- i.e. the finest wavelength grid
+    affordable for the shared LF subsample size.
+    """
+    for stride in range(1, n_wavelengths + 1):
+        offset = (stride // 2) % stride
+        n_lf_lambda = len(
+            select_wavelength_subgrid(n_wavelengths, stride=stride, offset=offset)
+        )
+        n_hf_lambda = len(select_wavelength_subgrid(n_wavelengths, stride=stride))
+        n_total = n_lf_samples * n_lf_lambda + n_hf_samples * n_hf_lambda
+        if n_total <= max_points:
+            return stride
+    raise ValueError(
+        f"no stride in [1, {n_wavelengths}] keeps the augmented design "
+        f"(n_lf={n_lf_samples}, n_hf={n_hf_samples}) within "
+        f"max_points={max_points}"
+    )
 
 
 def lf_column_moments(Y_lf: np.ndarray) -> tuple[np.ndarray, np.ndarray]:

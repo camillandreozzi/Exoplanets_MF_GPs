@@ -1,6 +1,21 @@
 {
-  "rmse": 0.0001484876246861495,
-  "mean_abs_standardized_residual": 1.263217812170189,
-  "fraction_within_95ci": 0.7692307692307693,
-  "mean_nrmse": 0.10101029745148098
+  "model_1a": {
+    "rmse": 0.00014405822937466176,
+    "mean_abs_standardized_residual": 1.137590263129974,
+    "fraction_within_95ci": 0.8461538461538461,
+    "mean_nrmse": 0.09907068754138096,
+    "mean_predictive_std": 0.00010433371251856186
+  },
+  "model_1b": {
+    "rmse": 0.00015517368969243382,
+    "mean_abs_standardized_residual": 1.315014221878056,
+    "fraction_within_95ci": 0.7692307692307693,
+    "mean_nrmse": 0.11084070042706301,
+    "mean_predictive_std": 0.00010158350111809592
+  },
+  "comparison": {
+    "rmse_ratio_1a_over_1b": 0.9283676225022183,
+    "lower_rmse": "model_1a",
+    "lower_mean_nrmse": "model_1a"
+  }
 }

@@ -11,7 +11,7 @@ methods anywhere in the project). All computational approximations are **data
 subsampling**: the exact posterior is computed on a subset of the available
 training data because the full designs exceed memory. The remaining numerical
 devices (jitter, noise floors, bound constraints, standardizations) are listed
-in §5.
+in §4.
 
 ---
 
@@ -59,39 +59,36 @@ sklearn's `GaussianProcessRegressor` with `alpha = 1e-10` and
 
 ---
 
-## 2. Model 1A / 1B: closed-form rho layers (kernel-free)
+## 2. Model 1 (A and B): per-wavelength joint AR(1) MF-GPs
 
-**No GP kernel is fitted.** These are closed-form through-origin AR(1) MLEs on
-per-wavelength-standardized spectra (`mf_gp.per_wavelength_rho`,
-`mf_gp.global_rho`; CV variants in `cv.fit_rho_model`):
+**Structure (shared by both variants)**: 195 GPs, one per wavelength bin j.
+Each uses the AR(1) kernel of §1.2 over the **9 atmospheric inputs** (Kzz,
+Rp, Tint, C, N, O, S, logg, f) + fidelity flag. No correlation across
+wavelengths is modelled. The two variants differ ONLY in the criterion for ρ
+(the former closed-form/kernel-free rho layers were removed deliberately —
+every model in the project is a jointly fitted MF-GP):
 
-- z_LF[i,j] = (YLF[i,j] − μ_LF[j]) / sd_LF[j],  r_HF[i,j] = (YHF[i,j] − μ_HF[j]) / sd_LF[j]
-- **Model 1B**: ρ_j = Σ_i r_HF·z_LF / Σ_i z_LF² per wavelength (195 values).
-- **Model 1A**: one pooled ρ over all (sample, wavelength) pairs
-  (variance-weighted; not the mean of the ρ_j).
+- **Model 1B** (`fit_joint_mf_gp`): one free ρ_j per wavelength inside that
+  wavelength's own marginal likelihood → **22 hyperparameters per
+  wavelength**, 195 separate optimizations, 195 independent ρ_j.
+- **Model 1A** (`fit_joint_mf_gp_global_rho`): ONE scalar ρ shared by all
+  wavelengths, optimized against the SUM of the 195 log marginal likelihoods
+  (= the joint likelihood; wavelengths are conditionally independent given
+  the hyperparameters) → 195×21 per-wavelength hyperparameters + 1 shared ρ.
+  Fitted by block-coordinate ascent: (step A) ρ fixed → refit every
+  wavelength's remaining hyperparameters; (step B) kernels fixed → staged
+  global grid search of the summed likelihood over log ρ. Neither step can
+  decrease the joint likelihood; sweeps stop when the ρ update moves by
+  less than 1e-3 in log space (`GLOBAL_RHO_LOG_TOL`). The production fit
+  warm-starts from the persisted Model 1B layer on the identical design
+  (initialization only — the criterion is unchanged) and converged in 7
+  sweeps with monotone likelihood ascent.
 
-**Approximations: none.** Exact closed forms on the full 97 paired samples
-(fold-restricted moments during CV). Note these models consume the held-out
-sample's paired LF spectrum at prediction time — a structural information
-advantage over the GP models, not an approximation.
-
-Fitted values (full data): pooled ρ̂ = 0.350 (linear), 0.460 (log10);
-ρ̂_j ranges ≈ 0.10–0.67 (linear).
-
----
-
-## 3. Model 1: per-wavelength joint AR(1) MF-GP
-
-**Structure**: 195 *independent* GPs, one per wavelength bin j. Each uses the
-AR(1) kernel of §1.2 over the **9 atmospheric inputs** (Kzz, Rp, Tint, C, N,
-O, S, logg, f) + fidelity flag → **22 hyperparameters per wavelength**
-(2 signal variances + 2×9 ARD length scales + ρ_j + 2 noises), i.e. 195
-separate marginal-likelihood optimizations and 195 independent ρ_j.
-No correlation across wavelengths is modelled.
-
-Fitted per scale (`fit_joint_mf_gp`), artifacts in
-`results/modelling/01_per_wavelength_ar1/joint_mf_gp/` and its
-`log_modelling` mirror:
+Fitted shared ρ (Model 1A, 400-LF testing design): **0.2261** (linear, 7
+sweeps), **0.2969** (log10, 13 sweeps).
+Model 1B fitted values per scale, artifacts in
+`results/modelling/01_per_wavelength_ar1/model_1b/` and its
+`log_modelling` mirror (Model 1A analogues in `model_1a/`):
 
 | Quantity (median over 195 λ, min–max) | Linear | log10 |
 |---|---|---|
@@ -115,7 +112,7 @@ rows** (+ all 97 HF rows; `SUBSAMPLE_SIZE = 400`, the documented TESTING size;
 (`00_benchmark_exact_fit.py`) recommends ~1500–1700 LF for an ~8 h production
 run; a 1700-LF run (~6.7 h) was executed historically but is not the persisted
 artifact. Inference given the subsample is exact. The 5-fold CV of this model
-(`validation/02_full_cv`, and the Model 1 joint baseline inside the Model 2
+(`validation/02_full_cv`, and the Model 1A/1B baselines inside the Model 2
 comparison) uses an even smaller **200-LF testing subsample** because every
 fold refits all 195 GPs.
 
@@ -128,7 +125,7 @@ effectively noiseless and the floor acts as jitter).
 
 ---
 
-## 4. Model 2: wavelength-augmented joint MF-GP
+## 3. Model 2: wavelength-augmented joint MF-GP
 
 **Structure**: ONE scalar-valued AR(1) MF-GP over the augmented input
 z = (θ, λ) ∈ ℝ¹⁰ per output scale. Same composite kernel as §1.2 but with
@@ -201,12 +198,12 @@ All CV comparisons pair identical KFold assignments (asserted at runtime).
 
 ---
 
-## 5. Consolidated list of approximations and numerical devices
+## 4. Consolidated list of approximations and numerical devices
 
 | # | Device | Where | Reason | Nature |
 |---|---|---|---|---|
-| 1 | LF subsample 400 (persisted) / 1500–1700 (production rec.) of 10,000 | Model 1 joint GP, per λ | 40.8 GB/iter exact fit vs 17.2 GB RAM | data subsampling; inference exact |
-| 2 | LF subsample 200 | Model 1 joint GP inside all 5-fold CVs | 5× refit of 195 GPs per scale | data subsampling (testing config) |
+| 1 | LF subsample 400 (persisted) / 1500–1700 (production rec.) of 10,000 | Model 1 joint GPs (A/B), per λ | 40.8 GB/iter exact fit vs 17.2 GB RAM | data subsampling; inference exact |
+| 2 | LF subsample 200 | Model 1A/1B GP layers inside all 5-fold CVs | 5× refit of 195 GPs per scale | data subsampling (testing config) |
 | 3 | Augmented design 3,385 of 1.97 M points (stride-8 λ subgrids + 40 LF samples) | Model 2 production fits | memory cap n ≈ 5,640; super-cubic time | data subsampling; inference exact |
 | 4 | CV design 2,055 points (stride 13) | Model 2 5-fold CV | fold refit cost; LOO ruled out | data subsampling |
 | 5 | `alpha = 1e-10` diagonal jitter | every GP | Cholesky PSD safety | numerical |
@@ -218,20 +215,18 @@ All CV comparisons pair identical KFold assignments (asserted at runtime).
 | 11 | Log10 predictions back-transformed as 10^μ (log-normal median) | log-scale CV comparisons | point summary choice for original-unit scoring | modelling convention, not approximation of the fit |
 
 **Explicitly NOT used anywhere:** Vecchia approximations, inducing points /
-sparse variational GPs, Nyström, Kronecker/structured solvers, and the
-recursive (Le Gratiet) two-step decomposition — the last was a deliberate
-methodological decision (single joint likelihood defines the model), the
-others were ruled out in favour of exact inference on subsampled designs.
+sparse variational GPs, and Nyström. These were ruled out in favour of exact
+inference on subsampled designs.
 
 ---
 
-## 6. Pointers
+## 5. Pointers
 
 - Kernel implementation: `src/exoplanets_mf/mf_gp.py` (`AR1MultiFidelityKernel`,
   `make_joint_mf_kernel`, bounds/inits, memory gate), `src/exoplanets_mf/model2.py`
   (augmented design, per-λ standardization, Model 2 fit/predict/CV).
-- Fitted hyperparameters: `results/modelling/01_per_wavelength_ar1/joint_mf_gp/
-  joint_mf_gp_hyperparameters.csv` (+ `log_modelling` mirror);
+- Fitted hyperparameters: `results/modelling/01_per_wavelength_ar1/model_1b/
+  model_1b_hyperparameters.csv (and model_1a/model_1a_hyperparameters.csv)` (+ `log_modelling` mirror);
   `results/modelling/02_augmented_wavelength/{linear,log10}/model2_hyperparameters.csv`.
 - Sizing derivations: `results/modelling/01_per_wavelength_ar1/benchmark/
   exact_fit_benchmark.json`; `results/modelling/02_augmented_wavelength/

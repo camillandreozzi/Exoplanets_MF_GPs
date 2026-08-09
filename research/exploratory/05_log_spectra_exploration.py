@@ -115,6 +115,7 @@ def plot_correlation_linear_vs_log(wl, per_wavelength, per_wavelength_log,
             label=f"linear (mean={per_wavelength.mean():.3f})")
     ax.plot(wl, per_wavelength_log, ".-", color="tab:green", lw=1, alpha=0.7,
             label=f"log10 (mean={per_wavelength_log.mean():.3f})")
+    spectra00.set_log_wavelength_axis(ax, wl)
     ax.set_xlabel("Wavelength [um]")
     ax.set_ylabel("Pearson r (HF vs LF) across samples")
     ax.set_title("Per-wavelength HF/LF correlation: linear vs log10 scale")

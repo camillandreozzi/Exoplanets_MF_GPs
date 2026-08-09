@@ -1,4 +1,4 @@
-"""Run the joint AR(1) multi-fidelity GP fit."""
+"""Run the sklearn/custom-kernel per-wavelength MF-GP workflows."""
 
 from __future__ import annotations
 
@@ -13,7 +13,11 @@ EXPERIMENT_RESULTS_DIR = MODELLING_RESULTS_DIR / "01_per_wavelength_ar1"
 
 def main() -> None:
     workflow_dir = Path(__file__).resolve().parent
-    workflows = sorted(workflow_dir.glob("[0-9][0-9]_*.py"))
+    workflows = [
+        workflow
+        for workflow in sorted(workflow_dir.glob("[0-9][0-9]_*.py"))
+        if "gpboost" not in workflow.stem
+    ]
 
     for workflow in workflows:
         print(f"\n{'=' * 72}\nRunning {workflow.name}\n{'=' * 72}", flush=True)

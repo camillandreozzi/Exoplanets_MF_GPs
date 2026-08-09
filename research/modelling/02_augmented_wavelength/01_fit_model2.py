@@ -1,11 +1,12 @@
 """Fit Model 2 (wavelength-augmented joint MF-GP) on linear and log10 spectra.
 
 One scalar-valued AR(1) MF-GP over z = (theta, lambda) per output scale: all
-97 HF samples on a stride-LAMBDA_STRIDE wavelength subgrid plus an LF sample
-subset on the half-stride-offset subgrid, one joint marginal likelihood, one
-scalar rho. The full augmented grid (~1.97M points) is far beyond the exact
-fit memory gate (see 00_benchmark_model2_fit.py), so the LF sample count is
-maximized against the measured time budget instead.
+97 HF samples on a stride wavelength subgrid plus the shared LF subsample on
+the half-stride-offset subgrid, one joint marginal likelihood, one scalar
+rho. The LF count is the project-wide LF_SUBSAMPLE_SIZE (the one canonical LF
+subsample shared by every model); the full augmented grid (~1.97M points) is
+far beyond the exact-fit memory gate, so the wavelength stride is derived from
+a runtime point budget (derive_lambda_stride) to keep the design affordable.
 """
 
 import json
@@ -18,26 +19,31 @@ import pandas as pd
 
 from exoplanets_mf.data import load_all
 from exoplanets_mf.instruments import instrument_mode_masks
-from exoplanets_mf.mf_gp import per_wavelength_rho
-from exoplanets_mf.model2 import fit_model2, predict_hf_model2
-from exoplanets_mf.paths import MODELLING_RESULTS_DIR
-from exoplanets_mf.reproducibility import RANDOM_SEED
+from exoplanets_mf.model2 import (
+    MODEL2_MAX_AUGMENTED_POINTS,
+    derive_lambda_stride,
+    fit_model2,
+    predict_hf_model2,
+)
+from exoplanets_mf.paths import (
+    LOG_MODELLING_RESULTS_DIR,
+    MODELLING_RESULTS_DIR,
+)
+from exoplanets_mf.reproducibility import LF_SUBSAMPLE_SIZE, RANDOM_SEED
 from exoplanets_mf.transforms import log10_spectra
 
 OUTPUT_DIR = MODELLING_RESULTS_DIR / "02_augmented_wavelength"
+LOG_OUTPUT_DIR = LOG_MODELLING_RESULTS_DIR / "02_augmented_wavelength"
 
 SEED = RANDOM_SEED
-# Sizing pinned from benchmark/model2_fit_benchmark.json (memory cap
-# n=5640; timing ladder anchor: n=2955 fitted in ~19 min). MODERATE size for
-# iteration: 40 LF samples -> n = 97*25 + 40*24 = 3385 points, ~30-45 min
-# per scale by cubic extrapolation. For a production run, raise toward the
-# benchmark recommendation of 120 LF samples (n=5305, ~1.8 h per scale,
-# recommended_production_lf_sample_size).
-LAMBDA_STRIDE = 8       # 25 HF + 24 offset LF wavelengths of 195
-LF_SAMPLE_SIZE = 40
+# The one canonical LF subsample shared by every model and CV (see
+# reproducibility.LF_SUBSAMPLE_SIZE) -- identical LF rows to Model 1. The
+# wavelength stride is derived from this size (in main, once the data shape is
+# known) so the augmented design stays within the measured runtime budget.
+LF_SAMPLE_SIZE = LF_SUBSAMPLE_SIZE
 
 
-def hyperparameter_table(layer, *, n_points: int) -> pd.DataFrame:
+def hyperparameter_table(layer, *, n_points: int, lambda_stride: int) -> pd.DataFrame:
     """Single-row table of the jointly fitted covariance parameters."""
     kernel = layer.model.kernel_
     low_amplitude, low_rbf = kernel.low_kernel.k1, kernel.low_kernel.k2
@@ -58,7 +64,7 @@ def hyperparameter_table(layer, *, n_points: int) -> pd.DataFrame:
         "fit_seconds": layer.fit_seconds,
         "n_points": n_points,
         "lf_sample_size": len(layer.lf_sample_indices),
-        "lambda_stride": LAMBDA_STRIDE,
+        "lambda_stride": lambda_stride,
         "low_lambda_length_scale_um": low_rbf.length_scale[-1] * lambda_scale_um,
         "delta_lambda_length_scale_um": delta_rbf.length_scale[-1] * lambda_scale_um,
     }
@@ -123,10 +129,11 @@ def plot_diagnostics(
 
     ax = axes[1]
     shade_instrument_modes(ax, wavelengths)
-    ax.plot(
-        wavelengths, rho_1b, ".-", color="tab:blue", lw=1,
-        label="rho_j (Model 1B closed form)",
-    )
+    if rho_1b is not None:
+        ax.plot(
+            wavelengths, rho_1b, ".-", color="tab:blue", lw=1,
+            label="rho_j (Model 1B MF-GP)",
+        )
     ax.axhline(
         layer.rho, color="tab:red", ls="--",
         label=f"Model 2 scalar rho = {layer.rho:.3f}",
@@ -166,15 +173,25 @@ def plot_diagnostics(
     plt.close(fig)
 
 
+def load_model1b_rho(model1b_dir) -> np.ndarray | None:
+    """Fitted Model 1B GP rho_j for the diagnostic overlay, if available."""
+    csv_path = model1b_dir / "model_1b_hyperparameters.csv"
+    if not csv_path.exists():
+        print(f"  no Model 1B layer at {csv_path} -- overlay skipped")
+        return None
+    return pd.read_csv(csv_path)["rho"].to_numpy()
+
+
 def fit_and_report(
     X_lf: np.ndarray,
     Y_lf: np.ndarray,
     X_hf: np.ndarray,
     Y_hf: np.ndarray,
-    Y_lf_paired: np.ndarray,
+    model1b_dir,
     wavelengths: np.ndarray,
     input_names: list[str],
     *,
+    lambda_stride: int,
     output_units: str,
     output_dir,
 ) -> None:
@@ -188,7 +205,7 @@ def fit_and_report(
         wavelengths,
         seed=SEED,
         lf_sample_size=LF_SAMPLE_SIZE,
-        lambda_stride=LAMBDA_STRIDE,
+        lambda_stride=lambda_stride,
     )
     elapsed = time.perf_counter() - t0
     n_points = layer.model.X_train_.shape[0]
@@ -198,14 +215,14 @@ def fit_and_report(
         f"logML={layer.model.log_marginal_likelihood():.1f}"
     )
 
-    table = hyperparameter_table(layer, n_points=n_points)
+    table = hyperparameter_table(layer, n_points=n_points, lambda_stride=lambda_stride)
     table.to_csv(output_dir / "model2_hyperparameters.csv", index=False)
     joblib.dump(layer, output_dir / "model2_layer.joblib")
     plot_diagnostics(
         layer,
         X_hf,
         Y_hf,
-        per_wavelength_rho(Y_hf, Y_lf_paired),
+        load_model1b_rho(model1b_dir),
         input_names,
         output_units=output_units,
         savepath=output_dir / "01_model2_diagnostics.png",
@@ -216,7 +233,7 @@ def fit_and_report(
                 "output_units": output_units,
                 "n_points": int(n_points),
                 "lf_sample_size": LF_SAMPLE_SIZE,
-                "lambda_stride": LAMBDA_STRIDE,
+                "lambda_stride": lambda_stride,
                 "n_hf_wavelengths": int(len(layer.hf_lambda_indices)),
                 "n_lf_wavelengths": int(len(layer.lf_lambda_indices)),
                 "fit_seconds": round(layer.fit_seconds, 1),
@@ -236,16 +253,27 @@ def main() -> None:
     YLF_10k = data["YLF_10k"].to_numpy()
     XHF = data["XHF"].to_numpy()
     YHF = data["YHF"].to_numpy()
-    YLF_paired = data["YLF"].to_numpy()
     input_names = list(data["XHF"].columns) + ["lambda"]
+
+    # Derive the wavelength stride for the shared LF subsample size: the finest
+    # grid whose augmented design stays within the production runtime budget.
+    lambda_stride = derive_lambda_stride(
+        LF_SAMPLE_SIZE,
+        len(XHF),
+        len(wavelengths),
+        max_points=MODEL2_MAX_AUGMENTED_POINTS,
+    )
 
     print(
         f"Fitting Model 2: {LF_SAMPLE_SIZE} of {len(XLF_10k)} LF samples "
-        f"(lambda stride {LAMBDA_STRIDE}, offset {LAMBDA_STRIDE // 2}) + "
-        f"{len(XHF)} HF samples (stride {LAMBDA_STRIDE}), both scales"
+        f"(lambda stride {lambda_stride}, offset {lambda_stride // 2}) + "
+        f"{len(XHF)} HF samples (stride {lambda_stride}), both scales"
     )
     fit_and_report(
-        XLF_10k, YLF_10k, XHF, YHF, YLF_paired, wavelengths, input_names,
+        XLF_10k, YLF_10k, XHF, YHF,
+        MODELLING_RESULTS_DIR / "01_per_wavelength_ar1" / "model_1b",
+        wavelengths, input_names,
+        lambda_stride=lambda_stride,
         output_units="original eclipse-depth units",
         output_dir=OUTPUT_DIR / "linear",
     )
@@ -254,11 +282,12 @@ def main() -> None:
         log10_spectra(YLF_10k),
         XHF,
         log10_spectra(YHF),
-        log10_spectra(YLF_paired),
+        LOG_MODELLING_RESULTS_DIR / "01_per_wavelength_ar1" / "model_1b",
         wavelengths,
         input_names,
+        lambda_stride=lambda_stride,
         output_units="log10 eclipse-depth units",
-        output_dir=OUTPUT_DIR / "log10",
+        output_dir=LOG_OUTPUT_DIR / "log10",
     )
 
 

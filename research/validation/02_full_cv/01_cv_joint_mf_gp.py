@@ -23,16 +23,14 @@ from exoplanets_mf.data import load_all
 from exoplanets_mf.instruments import instrument_mode_masks
 from exoplanets_mf.mf_gp import fit_joint_mf_gp, predict_hf
 from exoplanets_mf.paths import VALIDATION_RESULTS_DIR
-from exoplanets_mf.reproducibility import RANDOM_SEED
+from exoplanets_mf.reproducibility import LF_SUBSAMPLE_SIZE, RANDOM_SEED
 
 OUTPUT_DIR = VALIDATION_RESULTS_DIR / "02_full_cv" / "evaluation"
 
 N_SPLITS = CV_FULL_MODEL_SPLITS  # each fold refits the full 195-GP layer
-# Smaller LF subsample than the single production fit because the layer is
-# refitted N_SPLITS times. TESTING value: 200 LF + 97 HF is ~2 s/wavelength,
-# so 5 folds x 195 wavelengths ~ 30-40 min. For production, size against the
-# measured budget (e.g. 900 LF ~ 27 s/wavelength -> ~7.3 h for 5 folds).
-SUBSAMPLE_SIZE = 200
+# The one canonical LF subsample shared by every model and CV (see
+# reproducibility.LF_SUBSAMPLE_SIZE) -- identical rows to the production fits.
+SUBSAMPLE_SIZE = LF_SUBSAMPLE_SIZE
 SEED = RANDOM_SEED
 CI_Z = stats.norm.ppf(0.975)
 

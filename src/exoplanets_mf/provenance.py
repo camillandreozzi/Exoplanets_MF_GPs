@@ -14,6 +14,7 @@ from .paths import PROJECT_ROOT
 from .reproducibility import RANDOM_SEED
 
 TRACKED_PACKAGES = (
+    "gpboost",
     "matplotlib",
     "numpy",
     "pandas",
@@ -38,8 +39,7 @@ def write_run_metadata(
         "python": platform.python_version(),
         "platform": platform.platform(),
         "packages": {
-            package: importlib.metadata.version(package)
-            for package in TRACKED_PACKAGES
+            package: _package_version(package) for package in TRACKED_PACKAGES
         },
         "git": _git_metadata(),
         "data_checksums_sha256": _data_checksums(),
@@ -51,6 +51,14 @@ def write_run_metadata(
         json.dumps(metadata, indent=2, sort_keys=True) + "\n",
         encoding="utf-8",
     )
+
+
+def _package_version(package: str) -> str:
+    """Installed version, or "not installed" for an optional tracked package."""
+    try:
+        return importlib.metadata.version(package)
+    except importlib.metadata.PackageNotFoundError:
+        return "not installed"
 
 
 def _git_metadata() -> dict[str, object]:

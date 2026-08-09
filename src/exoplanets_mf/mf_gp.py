@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import os
 import time
+import warnings
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -53,12 +54,16 @@ N_INPUT_DIMS = 9  # Kzz, Rp, Tint, C, N, O, S, logg, f  #TODO: keep in sync with
 # 1. Joint AR(1) covariance
 # ---------------------------------------------------------------------------
 
-SIGNAL_VARIANCE_BOUNDS = (1e-3, 1e3)      # TODO: widen if a fitted sigma^2 sits at a bound
-LENGTH_SCALE_BOUNDS = (1e-2, 1e2)         # TODO: standardized-input units; near-inert inputs (6 of 9, per prior sensitivity analysis) are expected to drift toward the upper bound
-LENGTH_SCALE_INIT = 1.0                   # TODO: initial ARD length-scale (identical across the 9 dims before optimization)
-RHO_BOUNDS = (1e-3, 1e3)
+SIGNAL_VARIANCE_BOUNDS = (1e-3, 1e5)      # widened from 1e3: fitted sigma^2 were pinning at the upper bound
+LENGTH_SCALE_BOUNDS = (1e-3, 1e5)         # widened from 1e3; standardized-input units. Near-inert inputs (6 of 9, per prior sensitivity analysis) drift toward the upper bound, so keep it high enough that the informative dims separate cleanly
+LENGTH_SCALE_INIT = 1.0                   # initial ARD length-scale (identical across the 9 dims before optimization)
+RHO_BOUNDS = (1e-3, 1e4)                  # widened from 1e3 to match the variance/length-scale headroom
 NOISE_LEVEL_BOUNDS = (1e-8, 1e1)
 NOISE_LEVEL_INIT = 1e-4
+
+# Log-space tolerance for flagging a fitted hyperparameter that has come to
+# rest against one of the bounds above.
+BOUND_PIN_ATOL = 1e-6
 
 
 class AR1MultiFidelityKernel(Kernel):
@@ -291,6 +296,65 @@ def make_joint_mf_kernel(n_dims: int = N_INPUT_DIMS) -> AR1MultiFidelityKernel:
     )
 
 
+def _free_hyperparameter_names(kernel: Kernel) -> list[str]:
+    """Names aligned to ``kernel.theta`` (non-fixed params, ARD dims expanded)."""
+    names: list[str] = []
+    for hp in kernel.hyperparameters:
+        if hp.fixed:
+            continue
+        if hp.n_elements > 1:
+            names.extend(f"{hp.name}_{i}" for i in range(hp.n_elements))
+        else:
+            names.append(hp.name)
+    return names
+
+
+def detect_pinned_hyperparameters(gp: GaussianProcessRegressor) -> dict[str, str]:
+    """Fitted hyperparameters resting against a bound -> "lower"/"upper".
+
+    Compares the fitted log-space ``theta`` to the log-space ``bounds`` of the
+    fitted kernel (both exclude 'fixed' params). Infinite bounds are skipped.
+    """
+    kernel = gp.kernel_
+    pinned: dict[str, str] = {}
+    names = _free_hyperparameter_names(kernel)
+    for name, value, (lo, hi) in zip(names, kernel.theta, kernel.bounds):
+        if not np.isfinite(lo) or not np.isfinite(hi):
+            continue
+        if np.isclose(value, lo, atol=BOUND_PIN_ATOL, rtol=0.0):
+            pinned[name] = "lower"
+        elif np.isclose(value, hi, atol=BOUND_PIN_ATOL, rtol=0.0):
+            pinned[name] = "upper"
+    return pinned
+
+
+def warn_on_pinned_bounds(
+    models: list[GaussianProcessRegressor], *, label: str
+) -> dict[tuple[str, str], int]:
+    """Emit one aggregated warning if any fitted hyperparameter pins a bound.
+
+    Returns a ``{(name, side): count}`` map (how many wavelengths pinned each
+    parameter at each bound). No warning is raised when nothing pins, so a
+    clean production rerun stays silent -- that silence is the signal the
+    widened bounds sufficed.
+    """
+    counts: dict[tuple[str, str], int] = {}
+    for gp in models:
+        for name, side in detect_pinned_hyperparameters(gp).items():
+            counts[(name, side)] = counts.get((name, side), 0) + 1
+    if counts:
+        detail = ", ".join(
+            f"{name}@{side} x{count}"
+            for (name, side), count in sorted(counts.items())
+        )
+        warnings.warn(
+            f"{label}: {len(models)} wavelengths fitted; hyperparameters pinned "
+            f"at a bound (widen the corresponding *_BOUNDS): {detail}",
+            stacklevel=2,
+        )
+    return counts
+
+
 # The default is the EXACT joint fit on all LF + HF rows (no approximation).
 # Cost per wavelength: each optimizer iteration factorizes the full n x n
 # covariance (cubic time) and materializes the kernel-gradient stack of
@@ -477,6 +541,7 @@ def fit_joint_mf_gp(
                 flush=True,
             )
 
+    warn_on_pinned_bounds(models, label="Model 1B (per-wavelength-rho MF-GP)")
     return JointMFGPLayer(
         wavelengths=np.asarray(wavelengths),
         scaler=scaler,
@@ -723,6 +788,18 @@ def fit_joint_mf_gp_global_rho(
     # Final consistency refit so every kernel carries the final rho.
     models, seconds = fit_all_fixed_rho(rho, templates, 0)
     total_seconds += seconds
+
+    # rho is 'fixed' in these kernels (swept separately), so check it against
+    # RHO_BOUNDS explicitly on top of the per-kernel bound scan.
+    warn_on_pinned_bounds(models, label="Model 1A (global-rho MF-GP)")
+    rho_lo, rho_hi = RHO_BOUNDS
+    if np.isclose(np.log(rho), np.log(rho_lo), atol=BOUND_PIN_ATOL) or np.isclose(
+        np.log(rho), np.log(rho_hi), atol=BOUND_PIN_ATOL
+    ):
+        warnings.warn(
+            f"Model 1A shared rho={rho:.4g} pins RHO_BOUNDS={RHO_BOUNDS}; widen it",
+            stacklevel=2,
+        )
 
     return JointMFGPLayer(
         wavelengths=np.asarray(wavelengths),

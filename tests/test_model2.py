@@ -7,17 +7,24 @@ import unittest
 import numpy as np
 
 from exoplanets_mf.cv import cv_predict
-from exoplanets_mf.mf_gp import assert_exact_fit_fits_in_memory, exact_fit_memory_bytes
+from exoplanets_mf.mf_gp import (
+    assert_exact_fit_fits_in_memory,
+    exact_fit_memory_bytes,
+    fit_joint_mf_gp,
+    select_lf_subsample,
+)
 from exoplanets_mf.model2 import (
     N_AUGMENTED_DIMS,
     build_augmented_design,
     cv_predict_model2,
+    derive_lambda_stride,
     fit_model2,
     lf_column_moments,
     model2_n_theta,
     predict_hf_model2,
     select_wavelength_subgrid,
 )
+from exoplanets_mf.reproducibility import LF_SUBSAMPLE_SIZE, RANDOM_SEED
 
 
 def _toy_mf_problem(seed: int = 0, rho_true: float = 0.7):
@@ -67,6 +74,60 @@ class WavelengthSubgridTests(unittest.TestCase):
             select_wavelength_subgrid(10, stride=3, offset=3)
         with self.assertRaises(ValueError):
             select_wavelength_subgrid(10, stride=3, offset=-1)
+
+
+class DeriveLambdaStrideTests(unittest.TestCase):
+    @staticmethod
+    def _n_total(n_lf, n_hf, n_w, stride):
+        offset = (stride // 2) % stride
+        return (
+            n_lf * len(select_wavelength_subgrid(n_w, stride=stride, offset=offset))
+            + n_hf * len(select_wavelength_subgrid(n_w, stride=stride))
+        )
+
+    def test_returns_smallest_stride_within_budget(self) -> None:
+        n_lf, n_hf, n_w, budget = 200, 97, 195, 3400
+        stride = derive_lambda_stride(n_lf, n_hf, n_w, max_points=budget)
+        # within budget ...
+        self.assertLessEqual(self._n_total(n_lf, n_hf, n_w, stride), budget)
+        # ... and the next-finer grid (stride - 1) would exceed it
+        self.assertGreater(self._n_total(n_lf, n_hf, n_w, stride - 1), budget)
+
+    def test_raises_when_no_stride_fits(self) -> None:
+        with self.assertRaises(ValueError):
+            derive_lambda_stride(10_000, 10_000, 195, max_points=1)
+
+
+class SharedSubsampleTests(unittest.TestCase):
+    """Every model must draw the ONE canonical LF subsample."""
+
+    def test_select_lf_subsample_is_deterministic(self) -> None:
+        a = select_lf_subsample(1000, LF_SUBSAMPLE_SIZE, seed=RANDOM_SEED)
+        b = select_lf_subsample(1000, LF_SUBSAMPLE_SIZE, seed=RANDOM_SEED)
+        self.assertEqual(a.shape, (LF_SUBSAMPLE_SIZE,))
+        np.testing.assert_array_equal(a, b)
+
+    def test_model1_and_model2_pick_identical_lf_rows(self) -> None:
+        """Given the same LF pool, size and seed, Model 1 and Model 2 select
+        the identical LF rows -- the enforced shared subsample."""
+        X_lf, Y_lf, X_hf, Y_hf, wavelengths = _toy_mf_problem()
+        size = 16
+        model1 = fit_joint_mf_gp(
+            X_lf, Y_lf, X_hf, Y_hf, wavelengths,
+            seed=RANDOM_SEED, subsample_size=size, n_restarts_optimizer=0,
+        )
+        model2 = fit_model2(
+            X_lf, Y_lf, X_hf, Y_hf, wavelengths,
+            seed=RANDOM_SEED, lf_sample_size=size, lambda_stride=2,
+            n_restarts_optimizer=0,
+        )
+        np.testing.assert_array_equal(
+            model1.subsample_indices, model2.lf_sample_indices
+        )
+        np.testing.assert_array_equal(
+            model1.subsample_indices,
+            select_lf_subsample(X_lf.shape[0], size, seed=RANDOM_SEED),
+        )
 
 
 class AugmentedDesignTests(unittest.TestCase):

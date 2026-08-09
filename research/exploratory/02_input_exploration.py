@@ -54,7 +54,7 @@ def plot_pairs(X, name, savepath, max_points=2000):
     """Lower-triangle scatter matrix; diagonal shows histograms.
 
     For the 10k design we subsample for legibility (a scatter of 10k x 10k
-    panels is just an ink blob; 2k points show the same shape).
+    panels is just an ink blob; 2,000 points show the same shape).
     """
     if len(X) > max_points:
         X = X.sample(max_points, random_state=RANDOM_SEED)

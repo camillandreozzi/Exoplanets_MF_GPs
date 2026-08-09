@@ -1,18 +1,32 @@
-"""Fit the joint multi-fidelity model while excluding only sample 81.
+"""Fit Models 1A and 1B while excluding only sample 81.
 
-Superseded by research/validation/02_full_cv (all 97 HF samples). Uses the
-same maximized LF subsample as the production fit (derivation in
-research/modelling/01_per_wavelength_ar1/01_fit_joint_mf_gp.py).
+Superseded by research/validation/02_full_cv (all 97 HF samples). Fits both
+per-wavelength AR(1) variants on the identical holdout design so
+02_predict_and_evaluate.py can compare them on the held-out spectrum:
+
+- Model 1B (fit_joint_mf_gp): one free rho_j per wavelength;
+- Model 1A (fit_joint_mf_gp_global_rho): ONE shared rho, warm-started from
+  the Model 1B holdout fit (same LF subsample and seed, enforced by the
+  fitter; the warm start changes only the starting point, not the criterion).
+
+Uses the same LF subsample size as the modelling fit scripts (derivation in
+research/modelling/01_per_wavelength_ar1/01_fit_model1b.py).
 """
+
+import time
 
 import joblib
 import numpy as np
-import pandas as pd
 
 from exoplanets_mf.data import load_all
-from exoplanets_mf.mf_gp import assert_holdout_row, fit_joint_mf_gp
+from exoplanets_mf.mf_gp import (
+    assert_holdout_row,
+    fit_joint_mf_gp,
+    fit_joint_mf_gp_global_rho,
+    hyperparameter_table,
+)
 from exoplanets_mf.paths import VALIDATION_RESULTS_DIR
-from exoplanets_mf.reproducibility import RANDOM_SEED
+from exoplanets_mf.reproducibility import LF_SUBSAMPLE_SIZE, RANDOM_SEED
 
 OUTPUT_DIR = VALIDATION_RESULTS_DIR / "01_loo_holdout_validation" / "fit"
 
@@ -20,32 +34,10 @@ HOLDOUT_ROW = 80
 HOLDOUT_KZZ = 8.47701413791753
 HOLDOUT_LABEL = "spectrum 81"
 
-SUBSAMPLE_SIZE = 400  # matches the fit script's current (testing) size
+# The one canonical LF subsample shared by every model (see
+# reproducibility.LF_SUBSAMPLE_SIZE); matches the fit scripts.
+SUBSAMPLE_SIZE = LF_SUBSAMPLE_SIZE
 SEED = RANDOM_SEED
-
-
-def hyperparameter_table(wavelengths, layer) -> pd.DataFrame:
-    rows = []
-    for wavelength, model in zip(wavelengths, layer.models):
-        kernel = model.kernel_
-        rows.append(
-            {
-                "wavelength": wavelength,
-                "rho": kernel.rho,
-                "low_signal_variance": (
-                    kernel.low_kernel.k1.constant_value
-                ),
-                "delta_signal_variance": (
-                    kernel.discrepancy_kernel.k1.constant_value
-                ),
-                "low_noise": kernel.low_noise,
-                "high_noise": kernel.high_noise,
-                "joint_log_marginal_likelihood": (
-                    model.log_marginal_likelihood()
-                ),
-            }
-        )
-    return pd.DataFrame(rows)
 
 
 def main() -> None:
@@ -63,25 +55,56 @@ def main() -> None:
     )
 
     train_mask = np.arange(len(XHF_df)) != HOLDOUT_ROW
-    layer = fit_joint_mf_gp(
-        data["XLF_10k"].to_numpy(),
-        data["YLF_10k"].to_numpy(),
-        XHF_df.to_numpy()[train_mask],
-        YHF_df.to_numpy()[train_mask],
+    XLF = data["XLF_10k"].to_numpy()
+    YLF = data["YLF_10k"].to_numpy()
+    XHF_train = XHF_df.to_numpy()[train_mask]
+    YHF_train = YHF_df.to_numpy()[train_mask]
+
+    print(
+        f"Model 1B excluding row {HOLDOUT_ROW}: {len(wavelengths)} "
+        f"wavelengths, {SUBSAMPLE_SIZE} LF + {len(XHF_train)} HF rows"
+    )
+    t0 = time.perf_counter()
+    layer_1b = fit_joint_mf_gp(
+        XLF,
+        YLF,
+        XHF_train,
+        YHF_train,
         wavelengths,
         seed=SEED,
         subsample_size=SUBSAMPLE_SIZE,
         progress_every=20,
     )
-
-    table = hyperparameter_table(wavelengths, layer)
+    rho_1b = layer_1b.rho
     print(
-        f"joint MF-GP excluding row {HOLDOUT_ROW}: "
-        f"rho mean={table['rho'].mean():.4f}, "
-        f"min={table['rho'].min():.4f}, max={table['rho'].max():.4f}"
+        f"Model 1B fit in {time.perf_counter() - t0:.1f}s: "
+        f"rho mean={rho_1b.mean():.4f}, "
+        f"min={rho_1b.min():.4f}, max={rho_1b.max():.4f}"
     )
-    table.to_csv(OUTPUT_DIR / "joint_mf_gp_hyperparameters.csv", index=False)
-    joblib.dump(layer, OUTPUT_DIR / "joint_mf_gp_layer.joblib")
+
+    print(f"Model 1A excluding row {HOLDOUT_ROW}: warm start from Model 1B")
+    t0 = time.perf_counter()
+    layer_1a = fit_joint_mf_gp_global_rho(
+        XLF,
+        YLF,
+        XHF_train,
+        YHF_train,
+        wavelengths,
+        seed=SEED,
+        subsample_size=SUBSAMPLE_SIZE,
+        warm_start_layer=layer_1b,
+        progress_every=40,
+    )
+    print(
+        f"Model 1A fit in {time.perf_counter() - t0:.1f}s over "
+        f"{len(layer_1a.global_rho_sweeps)} sweeps; "
+        f"shared rho = {layer_1a.rho[0]:.6f}"
+    )
+
+    for name, layer in (("model_1b", layer_1b), ("model_1a", layer_1a)):
+        table = hyperparameter_table(layer)
+        table.to_csv(OUTPUT_DIR / f"{name}_hyperparameters.csv", index=False)
+        joblib.dump(layer, OUTPUT_DIR / f"{name}_layer.joblib")
     print(f"outputs written to {OUTPUT_DIR}")
 
 

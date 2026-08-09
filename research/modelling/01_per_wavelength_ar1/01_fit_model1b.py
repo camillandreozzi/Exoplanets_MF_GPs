@@ -9,6 +9,12 @@ per optimizer iteration vs 16 GB RAM; ~1450 h extrapolated even with the
 memory -- see 00_benchmark_exact_fit.py). The LF subsample is therefore
 maximized against a practical time budget instead: memory would allow
 n ~ 5800, but time binds. Wall time is recorded per wavelength.
+
+Both fidelity scales are fit from one run: the linear spectra and the
+log10-transformed spectra (a mirror fit whose fitted quantities live in log10
+space and whose predictions must be back-transformed -- see the README). Each
+scale writes to its own results root; this consolidates the former
+research/log_modelling/ tree.
 """
 
 import json
@@ -19,30 +25,37 @@ import matplotlib.pyplot as plt
 
 from exoplanets_mf.data import load_all
 from exoplanets_mf.mf_gp import fit_joint_mf_gp, hyperparameter_table
-from exoplanets_mf.paths import MODELLING_RESULTS_DIR
-from exoplanets_mf.reproducibility import RANDOM_SEED
+from exoplanets_mf.paths import LOG_MODELLING_RESULTS_DIR, MODELLING_RESULTS_DIR
+from exoplanets_mf.reproducibility import LF_SUBSAMPLE_SIZE, RANDOM_SEED
+from exoplanets_mf.transforms import log10_spectra
 
-OUTPUT_DIR = MODELLING_RESULTS_DIR / "01_per_wavelength_ar1" / "model_1b"
-
-# TESTING size for fast iteration: 400 LF + 97 HF measured ~7 s/wavelength,
-# ~25 min for the full 195-wavelength run. For a production run, maximize
-# against the measured budget instead: the benchmark recommends ~1500 LF for
-# an 8 h run (1700 LF ran 100-316 s/wavelength, tracking ~10 h, when tried);
-# see benchmark/exact_fit_benchmark.json (recommended_lf_subsample).
-# NOTE: 02_fit_model1a.py warm-starts from this layer and must use the SAME
-# SUBSAMPLE_SIZE and seed.
-SUBSAMPLE_SIZE = 400
+# The one canonical LF subsample, shared by every model and CV (see
+# reproducibility.LF_SUBSAMPLE_SIZE). NOTE: 02_fit_model1a.py warm-starts from
+# this layer and inherits the SAME size and seed automatically.
+SUBSAMPLE_SIZE = LF_SUBSAMPLE_SIZE
 SEED = RANDOM_SEED
 
+# (name, results root, y transform, print phrase, plot-title suffix).
+SCALES = (
+    ("linear", MODELLING_RESULTS_DIR, None, "", ""),
+    (
+        "log10",
+        LOG_MODELLING_RESULTS_DIR,
+        log10_spectra,
+        ", log10 spectra",
+        " (log10 spectra)",
+    ),
+)
 
-def plot_diagnostics(table, savepath) -> None:
+
+def plot_diagnostics(table, savepath, title_suffix="") -> None:
     n_panels = 4 if "fit_seconds" in table else 3
     fig, ax = plt.subplots(1, n_panels, figsize=(5 * n_panels, 4))
     ax[0].plot(table["wavelength"], table["rho"], ".-")
     ax[0].set(
         xlabel=r"wavelength $\lambda$ [$\mu$m]",
         ylabel=r"$\rho_j$",
-        title="Model 1B jointly fitted scaling",
+        title=f"Model 1B jointly fitted scaling{title_suffix}",
     )
     ax[1].plot(
         table["wavelength"], table["low_signal_variance"], ".-", label="LF"
@@ -56,7 +69,7 @@ def plot_diagnostics(table, savepath) -> None:
     ax[1].set(
         xlabel=r"wavelength $\lambda$ [$\mu$m]",
         ylabel="signal variance",
-        title="Joint covariance components",
+        title=f"Joint covariance components{title_suffix}",
     )
     ax[1].legend()
     ax[2].plot(
@@ -65,7 +78,7 @@ def plot_diagnostics(table, savepath) -> None:
     ax[2].set(
         xlabel=r"wavelength $\lambda$ [$\mu$m]",
         ylabel="log marginal likelihood",
-        title="Joint LF/HF fit",
+        title=f"Joint LF/HF fit{title_suffix}",
     )
     if "fit_seconds" in table:
         ax[3].plot(table["wavelength"], table["fit_seconds"], ".-")
@@ -79,19 +92,22 @@ def plot_diagnostics(table, savepath) -> None:
     plt.close(fig)
 
 
-def main():
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    data = load_all()
+def run_pass(data, results_root, y_transform, phrase, title_suffix) -> None:
+    output_dir = results_root / "01_per_wavelength_ar1" / "model_1b"
+    output_dir.mkdir(parents=True, exist_ok=True)
     XLF_10k = data["XLF_10k"].to_numpy()
-    YLF_10k = data["YLF_10k"].to_numpy()
     XHF = data["XHF"].to_numpy()
+    YLF_10k = data["YLF_10k"].to_numpy()
     YHF = data["YHF"].to_numpy()
+    if y_transform is not None:
+        YLF_10k = y_transform(YLF_10k)
+        YHF = y_transform(YHF)
     wavelengths = data["wavelengths"]
 
     print(
-        f"Fitting Model 1B (per-wavelength rho MF-GPs): {len(wavelengths)} "
-        f"wavelengths, {SUBSAMPLE_SIZE} of {len(XLF_10k)} LF + {len(XHF)} HF "
-        "rows per fit"
+        f"Fitting Model 1B (per-wavelength rho MF-GPs{phrase}): "
+        f"{len(wavelengths)} wavelengths, {SUBSAMPLE_SIZE} of {len(XLF_10k)} "
+        f"LF + {len(XHF)} HF rows per fit"
     )
     t0 = time.perf_counter()
     layer = fit_joint_mf_gp(
@@ -114,10 +130,10 @@ def main():
         f"min={table['joint_log_marginal_likelihood'].min():.2f}"
     )
 
-    table.to_csv(OUTPUT_DIR / "model_1b_hyperparameters.csv", index=False)
-    joblib.dump(layer, OUTPUT_DIR / "model_1b_layer.joblib")
-    plot_diagnostics(table, OUTPUT_DIR / "01_model1b_diagnostics.png")
-    (OUTPUT_DIR / "timing_summary.json").write_text(
+    table.to_csv(output_dir / "model_1b_hyperparameters.csv", index=False)
+    joblib.dump(layer, output_dir / "model_1b_layer.joblib")
+    plot_diagnostics(table, output_dir / "01_model1b_diagnostics.png", title_suffix)
+    (output_dir / "timing_summary.json").write_text(
         json.dumps(
             {
                 "n_wavelengths": len(wavelengths),
@@ -133,7 +149,13 @@ def main():
             indent=2,
         )
     )
-    print(f"outputs written to {OUTPUT_DIR}")
+    print(f"outputs written to {output_dir}")
+
+
+def main():
+    data = load_all()
+    for _name, results_root, y_transform, phrase, title_suffix in SCALES:
+        run_pass(data, results_root, y_transform, phrase, title_suffix)
 
 
 if __name__ == "__main__":

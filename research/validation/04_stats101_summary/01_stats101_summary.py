@@ -2,8 +2,9 @@
 
 This workflow does not refit anything. It reuses the out-of-fold predictions
 saved by ``research/modelling/02_augmented_wavelength/02_cv_model2_vs_model1.py``
-(one consistent 5-fold CV protocol for Models 1A, 1B, 1 joint, and 2, on both
-linear and log10 spectra) and reports familiar introductory statistics:
+(one consistent 5-fold CV protocol for Models 1A, 1B, and 2 -- all joint
+MF-GPs -- on both linear and log10 spectra) and reports familiar
+introductory statistics:
 
 - R^2 (coefficient of determination), Pearson correlation r
 - MAE, RMSE, mean error (bias)
@@ -28,22 +29,29 @@ import numpy as np
 import pandas as pd
 
 from exoplanets_mf.data import load_YHF
-from exoplanets_mf.paths import MODELLING_RESULTS_DIR, VALIDATION_RESULTS_DIR
+from exoplanets_mf.paths import (
+    LOG_MODELLING_RESULTS_DIR,
+    MODELLING_RESULTS_DIR,
+    VALIDATION_RESULTS_DIR,
+)
 from exoplanets_mf.transforms import inverse_log10_spectra, log10_spectra
 
-CV_DIR = MODELLING_RESULTS_DIR / "02_augmented_wavelength" / "cv"
+CV_DIRS = {
+    "linear": MODELLING_RESULTS_DIR / "02_augmented_wavelength" / "cv" / "linear",
+    "log10": (
+        LOG_MODELLING_RESULTS_DIR / "02_augmented_wavelength" / "cv" / "log10"
+    ),
+}
 OUTPUT_DIR = VALIDATION_RESULTS_DIR / "04_stats101_summary"
 
 MODEL_LABELS = {
-    "model_1a": "Model 1A (global rho)",
-    "model_1b": "Model 1B (per-wavelength rho)",
-    "model_1_joint": "Model 1 joint (per-wavelength MF-GP)",
+    "model_1a": "Model 1A (global-rho MF-GP)",
+    "model_1b": "Model 1B (per-wavelength-rho MF-GP)",
     "model_2": "Model 2 (wavelength-augmented joint MF-GP)",
 }
 MODEL_SHORT_LABELS = {
     "model_1a": "Model 1A",
     "model_1b": "Model 1B",
-    "model_1_joint": "Model 1 joint",
     "model_2": "Model 2",
 }
 # Categorical palette validated for CVD separation on a white surface; every
@@ -51,7 +59,6 @@ MODEL_SHORT_LABELS = {
 MODEL_COLORS = {
     "model_1a": "#2a78d6",
     "model_1b": "#1baf7a",
-    "model_1_joint": "#eda100",
     "model_2": "#008300",
 }
 
@@ -71,10 +78,10 @@ def fmt(value: float) -> str:
 
 
 def load_cv_predictions(scale: str) -> dict[str, np.ndarray]:
-    path = CV_DIR / scale / "cv_predictions.npz"
+    path = CV_DIRS[scale] / "cv_predictions.npz"
     if not path.exists():
         raise FileNotFoundError(
-            f"{path} not found. Run `make model2` first to generate the "
+            f"{path} not found. Run `make modelling_sklearn` first to generate the "
             "out-of-fold CV predictions this summary reuses."
         )
     with np.load(path) as archive:
@@ -82,7 +89,7 @@ def load_cv_predictions(scale: str) -> dict[str, np.ndarray]:
 
 
 def load_cv_protocol(scale: str) -> dict:
-    return json.loads((CV_DIR / scale / "cv_summary.json").read_text())
+    return json.loads((CV_DIRS[scale] / "cv_summary.json").read_text())
 
 
 def stats101(y_true: np.ndarray, y_pred: np.ndarray) -> dict[str, float]:
@@ -318,7 +325,7 @@ def write_report(
             )
         view_tables.append("\n".join(lines))
 
-    report = f"""# Statistics-101 Summary: Models 1A, 1B, 1 joint, and 2
+    report = f"""# Statistics-101 Summary: Models 1A, 1B, and 2 (all joint MF-GPs)
 
 ## What each statistic means
 

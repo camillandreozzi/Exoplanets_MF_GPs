@@ -2,7 +2,7 @@
 
 ## Question
 
-How well does the joint AR(1) multi-fidelity GP (Model 1) predict HF spectra
+How well does the joint AR(1) multi-fidelity GP (Model 1B) predict HF spectra
 it has never seen — measured on **all 97 HF samples**, not a single fixed
 holdout? This experiment supersedes `01_loo_holdout_validation`, which
 validated only sample 81.
@@ -35,10 +35,10 @@ run's out-of-fold predictions via `exoplanets_mf.cv.compare_cv`.
 PYTHONPATH=src MPLBACKEND=Agg .venv/bin/python -m research.validation.02_full_cv
 ```
 
-Cost note: this refits the full 195-GP layer K times, so it uses a smaller
-LF subsample than the single fit (`SUBSAMPLE_SIZE` in the script; testing
-value 200 ≈ 30–40 min for all 5 folds; a production value like 900 LF
-measured ~27 s/wavelength ≈ 7.3 h for 5 folds).
+Cost note: this refits the full 195-GP layer K times on the one canonical LF
+subsample (`SUBSAMPLE_SIZE = LF_SUBSAMPLE_SIZE`, shared by every model and CV;
+see `exoplanets_mf.reproducibility`). At 200 LF that is ~30–40 min for all 5
+folds.
 
 ## Configuration
 
