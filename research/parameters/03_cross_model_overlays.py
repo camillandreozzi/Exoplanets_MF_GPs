@@ -28,6 +28,7 @@ from exoplanets_mf.parameter_tables import (
     load_parameter_table,
     noise_columns,
     shade_instrument_modes,
+    signal_variance_columns,
 )
 from exoplanets_mf.paths import PARAMETERS_RESULTS_DIR
 
@@ -47,10 +48,12 @@ def plot_rho(per_wavelength, scalar, savepath) -> None:
     if wl is not None:
         shade_instrument_modes(ax, wl)
     for entry, df in per_wavelength:
-        ax.plot(df["wavelength"], df["rho"], lw=1, color=entry.color, label=entry.label)
+        if "rho" in df.columns:
+            ax.plot(df["wavelength"], df["rho"], lw=1, color=entry.color, label=entry.label)
     for entry, df in scalar:
-        ax.axhline(float(df["rho"].iloc[0]), ls="--", lw=1.2, color=entry.color,
-                   label=f"{entry.label} (scalar)")
+        if "rho" in df.columns:
+            ax.axhline(float(df["rho"].iloc[0]), ls="--", lw=1.2, color=entry.color,
+                       label=f"{entry.label} (scalar)")
     ax.set(xlabel=r"wavelength $\lambda$ [$\mu$m]", ylabel=r"$\rho$",
            title="AR(1) scaling across all models")
     ax.legend(fontsize=7, ncol=2)
@@ -60,17 +63,29 @@ def plot_rho(per_wavelength, scalar, savepath) -> None:
 
 
 def plot_variance_family(per_wavelength, scalar, column, title, savepath) -> None:
+    def selected_column(df):
+        if column in df.columns:
+            return column
+        if column == "low_signal_variance" and "signal_variance" in df.columns:
+            return "signal_variance"
+        return None
+
     fig, ax = plt.subplots(figsize=(11, 6))
     wl = _first_wavelengths(per_wavelength)
     if wl is not None:
         shade_instrument_modes(ax, wl)
     for entry, df in per_wavelength:
-        if column in df.columns:
-            ax.plot(df["wavelength"], df[column], lw=1, color=entry.color, label=entry.label)
+        col = selected_column(df)
+        if col is not None:
+            suffix = "" if col == column else " (signal variance)"
+            ax.plot(df["wavelength"], df[col], lw=1, color=entry.color,
+                    label=f"{entry.label}{suffix}")
     for entry, df in scalar:
-        if column in df.columns:
-            ax.axhline(float(df[column].iloc[0]), ls="--", lw=1.2, color=entry.color,
-                       label=f"{entry.label} (scalar)")
+        col = selected_column(df)
+        if col is not None:
+            suffix = "" if col == column else ", signal variance"
+            ax.axhline(float(df[col].iloc[0]), ls="--", lw=1.2, color=entry.color,
+                       label=f"{entry.label} (scalar{suffix})")
     ax.set_yscale("log")
     ax.set(xlabel=r"wavelength $\lambda$ [$\mu$m]", ylabel=column, title=title)
     ax.legend(fontsize=7, ncol=2)
@@ -156,6 +171,20 @@ def build_summary(all_tables) -> pd.DataFrame:
         noise = noise_columns(df)
         noise_vals = np.concatenate([df[c].to_numpy() for c in noise.values()]) \
             if noise else np.array([np.nan])
+        signal = signal_variance_columns(df)
+
+        def min_or_nan(column: str) -> float:
+            return float(np.min(df[column])) if column in df.columns else np.nan
+
+        def max_or_nan(column: str) -> float:
+            return float(np.max(df[column])) if column in df.columns else np.nan
+
+        if "rho" in df.columns:
+            rho_mean = float(np.mean(df["rho"]))
+            rho_min = float(np.min(df["rho"]))
+            rho_max = float(np.max(df["rho"]))
+        else:
+            rho_mean = rho_min = rho_max = np.nan
         rows.append({
             "key": entry.key,
             "label": entry.label,
@@ -163,13 +192,15 @@ def build_summary(all_tables) -> pd.DataFrame:
             "backend": entry.backend,
             "space": entry.space,
             "n_rows": len(df),
-            "rho_mean": float(np.mean(df["rho"])),
-            "rho_min": float(np.min(df["rho"])),
-            "rho_max": float(np.max(df["rho"])),
-            "low_signal_var_min": float(np.min(df["low_signal_variance"])),
-            "low_signal_var_max": float(np.max(df["low_signal_variance"])),
-            "delta_signal_var_min": float(np.min(df["delta_signal_variance"])),
-            "delta_signal_var_max": float(np.max(df["delta_signal_variance"])),
+            "rho_mean": rho_mean,
+            "rho_min": rho_min,
+            "rho_max": rho_max,
+            "signal_var_min": min_or_nan(signal.get("signal variance", "")),
+            "signal_var_max": max_or_nan(signal.get("signal variance", "")),
+            "low_signal_var_min": min_or_nan(signal.get("LF signal variance", "")),
+            "low_signal_var_max": max_or_nan(signal.get("LF signal variance", "")),
+            "delta_signal_var_min": min_or_nan(signal.get("discrepancy signal variance", "")),
+            "delta_signal_var_max": max_or_nan(signal.get("discrepancy signal variance", "")),
             "noise_min": float(np.nanmin(noise_vals)),
             "noise_max": float(np.nanmax(noise_vals)),
             "length_scales_pinned_at_bound": pinned,
@@ -195,7 +226,7 @@ def main() -> None:
     if per_wavelength or scalar:
         plot_rho(per_wavelength, scalar, OUTPUT_DIR / "rho_vs_wavelength.png")
         plot_variance_family(per_wavelength, scalar, "low_signal_variance",
-                             "LF signal variance across all models",
+                             "LF / single-fidelity signal variance across all models",
                              OUTPUT_DIR / "low_signal_variance.png")
         plot_variance_family(per_wavelength, scalar, "delta_signal_variance",
                              "Discrepancy signal variance across all models",

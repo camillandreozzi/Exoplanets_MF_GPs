@@ -19,10 +19,13 @@ helpers live in `src/exoplanets_mf/parameter_tables.py`. Covered models:
 
 - **Per-wavelength** (`results/modelling/01_per_wavelength_ar1/`,
   `results/log_modelling/01_per_wavelength_ar1/`,
-  `results/validation/01_loo_holdout_validation/fit/`):
-  Model 1A, Model 1B, Model 1 (GPBoost), log-space 1A/1B, LOO-holdout 1A/1B.
+  `results/validation/01_loo_holdout_validation/fit/`,
+  `results/modelling/03_gpboost_comparison/full_fit/`):
+  Model 1A, Model 1B, Model 1 (GPBoost), log-space 1A/1B, LOO-holdout 1A/1B,
+  and the full-fit HF-only / Model 1A / Model 1B GPBoost comparison outputs.
 - **Scalar** (`results/modelling/02_augmented_wavelength/`):
-  Model 2 linear, Model 2 log10, Model 2 (GPBoost).
+  Model 2 linear, Model 2 log10, Model 2 (GPBoost), plus full-fit Model 2
+  GPBoost from `results/modelling/03_gpboost_comparison/full_fit/`.
 
 Instrument-band shading uses the shared `exoplanets_mf.instruments` definitions
 (NIRCam F322W2 `[2.4, 4)`, NIRCam F444W `[4, 5)`, MIRI LRS `[5, 12]` um).

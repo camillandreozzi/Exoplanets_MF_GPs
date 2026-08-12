@@ -10,7 +10,7 @@ because Model 2 folds wavelength into the kernel).
 This module hides that divergence behind a single registry plus a loader that
 normalises column names to a common vocabulary:
 
-    rho, low_signal_variance, delta_signal_variance,
+    rho, signal_variance, low_signal_variance, delta_signal_variance,
     low_length_scale_<i>, delta_length_scale_<i>,     # 0-indexed ARD dims
     low_noise / high_noise (sklearn) or error_var (gpboost),
     joint_log_marginal_likelihood (sklearn only),
@@ -57,6 +57,7 @@ __all__ = [
     "load_parameter_table",
     "available_entries",
     "shade_instrument_modes",
+    "signal_variance_columns",
     "length_scale_columns",
     "noise_columns",
     "count_pinned",
@@ -87,6 +88,10 @@ MODEL_COLORS = {
     "model2_linear": "#008300",
     "model2_log10": "#5aa02c",
     "model2_gpboost": "#b26a00",
+    "full_hf_only_gpboost": "#595959",
+    "full_model_1a_gpboost": "#a85c2f",
+    "full_model_1b_gpboost": "#c43b71",
+    "full_model_2_gpboost": "#3f7aa8",
 }
 
 
@@ -108,6 +113,7 @@ class ModelEntry:
 
 _MODELLING_1 = MODELLING_RESULTS_DIR / "01_per_wavelength_ar1"
 _MODELLING_2 = MODELLING_RESULTS_DIR / "02_augmented_wavelength"
+_GPBOOST_FULL = MODELLING_RESULTS_DIR / "03_gpboost_comparison" / "full_fit"
 _LOG_1 = LOG_MODELLING_RESULTS_DIR / "01_per_wavelength_ar1"
 _LOG_2 = LOG_MODELLING_RESULTS_DIR / "02_augmented_wavelength"
 _HOLDOUT = VALIDATION_RESULTS_DIR / "01_loo_holdout_validation" / "fit"
@@ -142,6 +148,18 @@ REGISTRY: tuple[ModelEntry, ...] = (
         "holdout_model_1b", "Model 1B (LOO holdout refit)", "per_wavelength", "sklearn", "linear",
         _HOLDOUT / "model_1b_hyperparameters.csv",
     ),
+    ModelEntry(
+        "full_hf_only_gpboost", "HF-only GPBoost (full fit)", "per_wavelength", "gpboost", "linear",
+        _GPBOOST_FULL / "hf_only_gpboost_hyperparameters.csv",
+    ),
+    ModelEntry(
+        "full_model_1a_gpboost", "Model 1A GPBoost (full fit)", "per_wavelength", "gpboost", "linear",
+        _GPBOOST_FULL / "model_1a_gpboost_hyperparameters.csv",
+    ),
+    ModelEntry(
+        "full_model_1b_gpboost", "Model 1B GPBoost (full fit)", "per_wavelength", "gpboost", "linear",
+        _GPBOOST_FULL / "model_1b_gpboost_hyperparameters.csv",
+    ),
     # --- scalar (wavelength-augmented) Model 2 ---------------------------
     ModelEntry(
         "model2_linear", "Model 2 (linear)", "scalar", "sklearn", "linear",
@@ -155,11 +173,59 @@ REGISTRY: tuple[ModelEntry, ...] = (
         "model2_gpboost", "Model 2 (GPBoost)", "scalar", "gpboost", "linear",
         _MODELLING_2 / "model2_gpboost" / "model2_gpboost_hyperparameters.csv",
     ),
+    ModelEntry(
+        "full_model_2_gpboost", "Model 2 GPBoost (full fit)", "scalar", "gpboost", "linear",
+        _GPBOOST_FULL / "model_2_gpboost_hyperparameters.csv",
+    ),
 )
 
 
-_GPBOOST_LOW_RANGE = re.compile(r"^low_GP_range_(\d+)$")
-_GPBOOST_DELTA_RANGE = re.compile(r"^discrepancy_GP_range_(\d+)$")
+_GPBOOST_LOW_RANGE = re.compile(r"^(?:cov_)?low_GP_range_(\d+)$")
+_GPBOOST_DELTA_RANGE = re.compile(r"^(?:cov_)?discrepancy_GP_range_(\d+)$")
+_GPBOOST_HF_RANGE = re.compile(r"^(?:cov_)?GP_range_(\d+)$")
+_GPBOOST_LOW_COMPACT_RANGE = re.compile(r"^low_range_(\d+)$")
+_GPBOOST_DELTA_COMPACT_RANGE = re.compile(r"^delta_range_(\d+)$")
+_GPBOOST_HF_COMPACT_RANGE = re.compile(r"^range_(\d+)$")
+
+
+def _copy_column_if_absent(df: pd.DataFrame, source: str, target: str) -> None:
+    if source in df.columns and target not in df.columns:
+        df[target] = df[source]
+
+
+def _copy_gpboost_range_columns(df: pd.DataFrame, *, entry: ModelEntry) -> None:
+    """Expose GPBoost range parameters with the common length-scale names."""
+    range_sources: dict[str, str] = {}
+    for col in df.columns:
+        if match := _GPBOOST_LOW_COMPACT_RANGE.match(col):
+            range_sources[f"low_length_scale_{int(match.group(1))}"] = col
+        elif match := _GPBOOST_DELTA_COMPACT_RANGE.match(col):
+            range_sources[f"delta_length_scale_{int(match.group(1))}"] = col
+        elif match := _GPBOOST_HF_COMPACT_RANGE.match(col):
+            range_sources[f"low_length_scale_{int(match.group(1))}"] = col
+
+    for col in df.columns:
+        if match := _GPBOOST_LOW_RANGE.match(col):
+            range_sources.setdefault(f"low_length_scale_{int(match.group(1)) - 1}", col)
+        elif match := _GPBOOST_DELTA_RANGE.match(col):
+            range_sources.setdefault(f"delta_length_scale_{int(match.group(1)) - 1}", col)
+        elif match := _GPBOOST_HF_RANGE.match(col):
+            range_sources.setdefault(f"low_length_scale_{int(match.group(1)) - 1}", col)
+
+    for target, source in range_sources.items():
+        _copy_column_if_absent(df, source, target)
+
+    _copy_column_if_absent(df, "low_lambda_range_um", "low_lambda_length_scale_um")
+    _copy_column_if_absent(df, "delta_lambda_range_um", "delta_lambda_length_scale_um")
+
+    if entry.kind == "scalar":
+        lambda_index = len(input_names())
+        _copy_column_if_absent(
+            df, f"low_length_scale_{lambda_index}", "low_lambda_length_scale_um"
+        )
+        _copy_column_if_absent(
+            df, f"delta_length_scale_{lambda_index}", "delta_lambda_length_scale_um"
+        )
 
 
 def load_parameter_table(entry: ModelEntry) -> pd.DataFrame | None:
@@ -175,23 +241,7 @@ def load_parameter_table(entry: ModelEntry) -> pd.DataFrame | None:
     df = pd.read_csv(entry.csv_path)
 
     if entry.backend == "gpboost":
-        # GPBoost "range" columns are 1-indexed; map to the sklearn 0-indexed
-        # low/delta length-scale names for a uniform downstream API.
-        renames: dict[str, str] = {}
-        for col in df.columns:
-            low = _GPBOOST_LOW_RANGE.match(col)
-            delta = _GPBOOST_DELTA_RANGE.match(col)
-            if low is not None:
-                renames[col] = f"low_length_scale_{int(low.group(1)) - 1}"
-            elif delta is not None:
-                renames[col] = f"delta_length_scale_{int(delta.group(1)) - 1}"
-        renames.update(
-            {
-                "low_lambda_range_um": "low_lambda_length_scale_um",
-                "delta_lambda_range_um": "delta_lambda_length_scale_um",
-            }
-        )
-        df = df.rename(columns={k: v for k, v in renames.items() if k in df.columns})
+        _copy_gpboost_range_columns(df, entry=entry)
 
     return df
 
@@ -234,6 +284,16 @@ def length_scale_columns(df: pd.DataFrame, prefix: str) -> list[str]:
     pattern = re.compile(rf"^{prefix}_length_scale_(\d+)$")
     matches = [(int(m.group(1)), c) for c in df.columns if (m := pattern.match(c))]
     return [col for _, col in sorted(matches)]
+
+
+def signal_variance_columns(df: pd.DataFrame) -> dict[str, str]:
+    """Map display labels to whichever signal-variance columns are present."""
+    labels = {
+        "signal_variance": "signal variance",
+        "low_signal_variance": "LF signal variance",
+        "delta_signal_variance": "discrepancy signal variance",
+    }
+    return {label: col for col, label in labels.items() if col in df.columns}
 
 
 def noise_columns(df: pd.DataFrame) -> dict[str, str]:

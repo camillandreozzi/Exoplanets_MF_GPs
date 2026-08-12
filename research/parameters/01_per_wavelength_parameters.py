@@ -1,7 +1,8 @@
-"""Per-model diagnostic grids of the per-wavelength AR(1) hyperparameters.
+"""Per-model diagnostic grids of the per-wavelength hyperparameters.
 
 For every per-wavelength model (Models 1A/1B, their log-space and LOO-holdout
-refits, and the GPBoost backend) this draws one figure of every fitted
+refits, GPBoost backends, and the HF-only GPBoost reference) this draws one
+figure of every fitted
 covariance parameter as a function of wavelength, with JWST instrument bands
 shaded and -- for the sklearn models -- the optimiser bounds drawn as dashed
 reference lines so a hyperparameter pinned at a bound (e.g. an inert input whose
@@ -27,6 +28,7 @@ from exoplanets_mf.parameter_tables import (
     load_parameter_table,
     noise_columns,
     shade_instrument_modes,
+    signal_variance_columns,
 )
 from exoplanets_mf.paths import PARAMETERS_RESULTS_DIR
 
@@ -39,8 +41,24 @@ def _bound_lines(ax, bounds) -> None:
         ax.axhline(value, color="black", ls=":", lw=0.8, alpha=0.6, zorder=1)
 
 
-def _plot_length_scales(ax, wavelengths, df, prefix, names, *, draw_bounds) -> None:
+def _missing_panel(ax, message: str) -> None:
+    ax.axis("off")
+    ax.text(
+        0.5,
+        0.5,
+        message,
+        ha="center",
+        va="center",
+        transform=ax.transAxes,
+        color="gray",
+    )
+
+
+def _plot_length_scales(ax, wavelengths, df, prefix, names, *, draw_bounds) -> bool:
     columns = length_scale_columns(df, prefix)
+    if not columns:
+        return False
+
     cmap = plt.get_cmap("viridis", max(len(columns), 1))
     for i, col in enumerate(columns):
         label = names[i] if i < len(names) else col
@@ -50,6 +68,7 @@ def _plot_length_scales(ax, wavelengths, df, prefix, names, *, draw_bounds) -> N
         _bound_lines(ax, LENGTH_SCALE_BOUNDS)
     ax.set(xlabel=r"wavelength $\lambda$ [$\mu$m]", ylabel="ARD length scale")
     ax.legend(fontsize=6, ncol=2, loc="best")
+    return True
 
 
 def plot_model(entry, df, savepath) -> None:
@@ -61,23 +80,43 @@ def plot_model(entry, df, savepath) -> None:
 
     # (0,0) rho
     ax = axes[0, 0]
-    shade_instrument_modes(ax, wavelengths)
-    ax.plot(wavelengths, df["rho"], ".-", lw=1, ms=3, color=entry.color)
-    if is_sklearn:
-        _bound_lines(ax, RHO_BOUNDS)
-        ax.set_yscale("log")
-    ax.set(xlabel=r"wavelength $\lambda$ [$\mu$m]", ylabel=r"$\rho$", title="AR(1) scaling")
+    if "rho" in df.columns:
+        shade_instrument_modes(ax, wavelengths)
+        ax.plot(wavelengths, df["rho"], ".-", lw=1, ms=3, color=entry.color)
+        if is_sklearn:
+            _bound_lines(ax, RHO_BOUNDS)
+            ax.set_yscale("log")
+        ax.set(
+            xlabel=r"wavelength $\lambda$ [$\mu$m]",
+            ylabel=r"$\rho$",
+            title="AR(1) scaling",
+        )
+    else:
+        _missing_panel(ax, "no rho\n(single-fidelity model)")
 
     # (0,1) signal variances
     ax = axes[0, 1]
-    shade_instrument_modes(ax, wavelengths)
-    ax.plot(wavelengths, df["low_signal_variance"], lw=1, color="tab:blue", label="LF")
-    ax.plot(wavelengths, df["delta_signal_variance"], lw=1, color="tab:orange", label="discrepancy")
-    ax.set_yscale("log")
-    if is_sklearn:
-        _bound_lines(ax, SIGNAL_VARIANCE_BOUNDS)
-    ax.set(xlabel=r"wavelength $\lambda$ [$\mu$m]", ylabel="signal variance", title="Signal variance")
-    ax.legend(fontsize=8)
+    signal = signal_variance_columns(df)
+    if signal:
+        shade_instrument_modes(ax, wavelengths)
+        palette = {
+            "signal variance": "tab:purple",
+            "LF signal variance": "tab:blue",
+            "discrepancy signal variance": "tab:orange",
+        }
+        for label, col in signal.items():
+            ax.plot(wavelengths, df[col], lw=1, color=palette.get(label, "tab:gray"), label=label)
+        ax.set_yscale("log")
+        if is_sklearn:
+            _bound_lines(ax, SIGNAL_VARIANCE_BOUNDS)
+        ax.set(
+            xlabel=r"wavelength $\lambda$ [$\mu$m]",
+            ylabel="signal variance",
+            title="Signal variance",
+        )
+        ax.legend(fontsize=8)
+    else:
+        _missing_panel(ax, "no signal variance")
 
     # (0,2) noise
     ax = axes[0, 2]
@@ -95,14 +134,19 @@ def plot_model(entry, df, savepath) -> None:
     # (1,0) LF length scales
     ax = axes[1, 0]
     shade_instrument_modes(ax, wavelengths)
-    _plot_length_scales(ax, wavelengths, df, "low", input_names(), draw_bounds=is_sklearn)
-    ax.set_title("LF ARD length scales")
+    if _plot_length_scales(ax, wavelengths, df, "low", input_names(), draw_bounds=is_sklearn):
+        title = "LF ARD length scales" if "rho" in df.columns else "GP ARD ranges"
+        ax.set_title(title)
+    else:
+        _missing_panel(ax, "no LF/GP length scales")
 
     # (1,1) discrepancy length scales
     ax = axes[1, 1]
     shade_instrument_modes(ax, wavelengths)
-    _plot_length_scales(ax, wavelengths, df, "delta", input_names(), draw_bounds=is_sklearn)
-    ax.set_title("Discrepancy ARD length scales")
+    if _plot_length_scales(ax, wavelengths, df, "delta", input_names(), draw_bounds=is_sklearn):
+        ax.set_title("Discrepancy ARD length scales")
+    else:
+        _missing_panel(ax, "no discrepancy length scales")
 
     # (1,2) joint LML (sklearn only)
     ax = axes[1, 2]
@@ -115,9 +159,7 @@ def plot_model(entry, df, savepath) -> None:
             title="Joint LML",
         )
     else:
-        ax.axis("off")
-        ax.text(0.5, 0.5, "no joint LML\n(GPBoost backend)", ha="center", va="center",
-                transform=ax.transAxes, color="gray")
+        _missing_panel(ax, "no joint LML\n(GPBoost backend)")
 
     fig.tight_layout(rect=(0, 0, 1, 0.97))
     fig.savefig(savepath, dpi=150, bbox_inches="tight")

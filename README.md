@@ -52,6 +52,7 @@ make check
 make diagnostics
 make models
 make validation
+make parameters
 make reports
 ```
 

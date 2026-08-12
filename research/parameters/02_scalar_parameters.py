@@ -23,6 +23,7 @@ from exoplanets_mf.parameter_tables import (
     length_scale_columns,
     load_parameter_table,
     noise_columns,
+    signal_variance_columns,
 )
 from exoplanets_mf.paths import PARAMETERS_RESULTS_DIR
 
@@ -40,12 +41,11 @@ def plot_model(entry, df, savepath) -> None:
     n_inputs = len(names)
     low_ls = _atmospheric_length_scales(df, "low", n_inputs)
     delta_ls = _atmospheric_length_scales(df, "delta", n_inputs)
-    rho = float(df["rho"].iloc[0])
+    rho = float(df["rho"].iloc[0]) if "rho" in df.columns else np.nan
 
     fig, axes = plt.subplots(1, 2, figsize=(15, 5.5))
-    fig.suptitle(
-        rf"{entry.label} -- scalar hyperparameters ($\rho$ = {rho:.4g})", fontsize=14
-    )
+    rho_text = rf" ($\rho$ = {rho:.4g})" if np.isfinite(rho) else ""
+    fig.suptitle(f"{entry.label} -- scalar hyperparameters{rho_text}", fontsize=14)
 
     # Panel 0: atmospheric ARD length scales, LF vs discrepancy.
     ax = axes[0]
@@ -64,8 +64,8 @@ def plot_model(entry, df, savepath) -> None:
     # Panel 1: remaining scalar covariance parameters (all strictly positive).
     ax = axes[1]
     summary: dict[str, float] = {
-        "LF signal var": float(df["low_signal_variance"].iloc[0]),
-        "discrepancy signal var": float(df["delta_signal_variance"].iloc[0]),
+        label.replace("variance", "var"): float(df[col].iloc[0])
+        for label, col in signal_variance_columns(df).items()
     }
     for label, col in noise_columns(df).items():
         summary[label] = float(df[col].iloc[0])

@@ -6,7 +6,7 @@ SYSTEM_PYTHON ?= python3
 PYTHON_VERSION := 3.14.3
 RUN_ENV := PYTHONPATH=src MPLBACKEND=Agg MPLCONFIGDIR=.cache/matplotlib
 
-.PHONY: help .python-version setup check diagnostics models validation reports reproduce reproduce-heavy
+.PHONY: help .python-version setup check diagnostics models validation parameters reports reproduce reproduce-heavy
 .PHONY: .stage-linear-family .stage-log-family .stage-augmented-family .stage-gpb-fits .stage-gpb-matched .stage-gpb-max
 .PHONY: .stage-holdout .stage-cv97 .stage-validation-summary .stage-parameter-reports
 
@@ -18,6 +18,7 @@ help:
 		'  make diagnostics       Produce exploratory and reverse-label outputs' \
 		'  make models            Produce model fits and matched comparisons' \
 		'  make validation        Produce holdout, full-CV, and Stats101 outputs' \
+		'  make parameters        Refresh fitted-parameter figures and tables' \
 		'  make reports           Produce fitted-parameter figures and tables' \
 		'  make reproduce         Produce the routine paper and diagnostic outputs' \
 		'  make reproduce-heavy   Also produce max-data GPBoost outputs'
@@ -70,6 +71,9 @@ models: .stage-gpb-matched
 	$(RUN_ENV) $(PYTHON) -m research.validation.04_stats101_summary
 
 validation: .stage-validation-summary
+
+parameters:
+	$(RUN_ENV) $(PYTHON) -m research.parameters
 
 .stage-parameter-reports: models .stage-holdout
 	$(RUN_ENV) $(PYTHON) -m research.parameters
