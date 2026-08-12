@@ -8,6 +8,11 @@ by side with its log10 counterpart.
 The observed spectrum contains negative depths (noise around small signals),
 so the log panel drops those points and clips lower error bars that would
 cross zero; the simulated spectra are strictly positive and transform cleanly.
+
+Both panels plot depths in original units: the log panel differs only in its
+log-scaled y-axis (ticks read 0.001, 0.01, ... rather than -3, -2) and in
+summarising HF by the geometric mean, the centre the log10 models actually
+fit.
 """
 
 import importlib
@@ -19,7 +24,7 @@ from scipy import stats
 
 from exoplanets_mf.data import load_all
 from exoplanets_mf.paths import EXPLORATORY_RESULTS_DIR
-from exoplanets_mf.transforms import log10_observed_errors, log10_spectra
+from exoplanets_mf.transforms import inverse_log10_spectra, log10_spectra
 
 # "00_spectra_exploration" starts with a digit, so a plain import statement is
 # invalid -- same importlib pattern as tests/test_mf_gp.py. Import-safe: the
@@ -63,41 +68,44 @@ def print_stats(entry) -> None:
         )
 
 
-def log_observed_frame(obs, floor):
-    """Observed data on log10 scale with the columns draw_hf_lf_observed reads.
+def log_plottable_observed_frame(obs, floor):
+    """Observed data restricted to what a log-scaled y-axis can draw.
 
-    Non-positive depths are dropped (unplottable on log scale); lower error
-    bars that would cross zero are clipped to `floor` (the minimum positive
-    simulated depth) so the bar remains drawable while visibly saturated.
+    Depths stay in original units -- the axis does the log transform -- but
+    non-positive depths are dropped (no position on a log axis) and lower
+    error bars that would cross zero are clipped to `floor` (the minimum
+    positive simulated depth) so the bar remains drawable while visibly
+    saturated.
     """
     positive = obs["measured_eclipse_depth"].to_numpy() > 0
     frame = obs.loc[positive].copy()
     depth = frame["measured_eclipse_depth"].to_numpy()
-    err_lo = np.minimum(
+    frame["measured_err_lo"] = np.minimum(
         frame["measured_err_lo"].to_numpy(), depth - floor
     )
-    err_lo_log, err_hi_log = log10_observed_errors(
-        depth, err_lo, frame["measured_err_hi"].to_numpy()
-    )
-    frame["measured_eclipse_depth"] = np.log10(depth)
-    frame["measured_err_lo"] = err_lo_log
-    frame["measured_err_hi"] = err_hi_log
     return frame, int((~positive).sum())
 
 
 def plot_linear_vs_log(wl, YHF, YLF_10k, obs, floor, savepath):
-    fig, axes = plt.subplots(1, 2, figsize=(16, 5), sharex=True)
+    # No sharex: each panel autoscales from the same wavelengths anyway, and
+    # sharing lets one panel's log-space extents leak into the other's limits.
+    fig, axes = plt.subplots(1, 2, figsize=(16, 5))
     spectra00.draw_hf_lf_observed(axes[0], wl, YHF, YLF_10k, obs)
-    obs_log, n_dropped = log_observed_frame(obs, floor)
+    obs_log, n_dropped = log_plottable_observed_frame(obs, floor)
     spectra00.draw_hf_lf_observed(
         axes[1],
         wl,
-        log10_spectra(YHF),
-        log10_spectra(YLF_10k),
+        YHF,
+        YLF_10k,
         obs_log,
-        ylabel="log10 eclipse depth",
+        # Percentiles commute with log10, so the LF band is unchanged; the HF
+        # centre is not -- in log space it is the geometric mean.
+        hf_center=inverse_log10_spectra(log10_spectra(YHF).mean(axis=0)),
+        hf_label="HF geometric mean",
+        log_depth=True,
+        ylabel="Eclipse depth (log scale)",
         title=(
-            "HF / LF / Observed spectra (log10)\n"
+            "HF / LF / Observed spectra (log scale)\n"
             f"{n_dropped} non-positive observed points dropped"
         ),
     )

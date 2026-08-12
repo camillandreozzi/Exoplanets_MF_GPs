@@ -2,7 +2,7 @@
 
 import matplotlib.pyplot as plt
 import numpy as np
-from matplotlib.ticker import NullFormatter, ScalarFormatter
+from matplotlib.ticker import FuncFormatter, NullFormatter, ScalarFormatter
 
 from exoplanets_mf.data import load_all
 from exoplanets_mf.instruments import instrument_mode_masks
@@ -15,6 +15,32 @@ FIG_DIR = EXPLORATORY_RESULTS_DIR
 _WAVELENGTH_TICKS = np.array(
     [0.5, 0.6, 0.7, 0.8, 0.9, 1, 1.5, 2, 2.5, 3, 4, 5, 6, 7, 8, 10, 12, 15, 20, 30]
 )
+
+
+def _decimal_tick_label(value, _pos=None) -> str:
+    """Plain-decimal tick label: 0.001, 0.01, 1e-06 -> '0.000001'.
+
+    ScalarFormatter cannot do this below 1e-4 (it rounds every such tick to
+    '0.0000'), so small-valued log axes need their own formatter.
+    """
+    if abs(value) >= 1:
+        return f"{value:g}"
+    return f"{value:.12f}".rstrip("0").rstrip(".")
+
+
+def _log_axis_limits(values, margin=0.05):
+    """Data limits padded by `margin` of the log10 span, as matplotlib would.
+
+    Log axes here are set *after* the artists are drawn, and matplotlib's
+    autoscale then mixes log-space and data-space extents whenever a
+    Collection (our fill_between band) sits on an already-log axis -- on a
+    shared x-axis that silently stretched the range down by a decade. Setting
+    the limits explicitly from the data makes the framing independent of draw
+    order and of axis sharing.
+    """
+    lo, hi = float(np.min(values)), float(np.max(values))
+    pad = margin * np.log10(hi / lo)
+    return lo * 10.0**-pad, hi * 10.0**pad
 
 
 def set_log_wavelength_axis(ax, wl) -> None:
@@ -34,6 +60,20 @@ def set_log_wavelength_axis(ax, wl) -> None:
     ]
     if ticks.size:
         ax.set_xticks(ticks)
+    ax.set_xlim(*_log_axis_limits(wl))
+
+
+def set_log_depth_axis(ax) -> None:
+    """Log-scale the eclipse-depth y-axis, keeping original-unit tick labels.
+
+    Depths span ~4 orders of magnitude, so the log view is the informative
+    one -- but the reader should read 0.001 off the axis, not a log10 value
+    of -3 that they have to exponentiate in their head. Plot the data in
+    original units and let the axis do the transform.
+    """
+    ax.set_yscale("log")
+    ax.yaxis.set_major_formatter(FuncFormatter(_decimal_tick_label))
+    ax.yaxis.set_minor_formatter(NullFormatter())
 
 
 def _lf_band(ax, wl, YLF, color="tab:orange", band=(5, 95)):
@@ -65,16 +105,22 @@ def plot_hf_lf(wl, YHF, YLF, savepath):
 
 
 def draw_hf_lf_observed(ax, wl, YHF, YLF, obs, *, ylabel="Eclipse depth",
-                        title="HF / LF / Observed spectra"):
+                        title="HF / LF / Observed spectra",
+                        hf_center=None, hf_label="HF mean", log_depth=False):
     """Draw one HF/LF/observed panel onto a provided Axes.
 
-    Data are plotted as given -- callers transform YHF/YLF/obs beforehand
-    (see research/exploratory/05_log_spectra_exploration.py for the log10
-    variant), keeping all transformation out of the plotting code.
+    Data are always plotted in original eclipse-depth units; `log_depth`
+    switches the *axis* to log scale rather than transforming the values
+    (see research/exploratory/05_log_spectra_exploration.py). `hf_center`
+    overrides the HF summary line -- the log view centres on the geometric
+    mean, which the caller computes -- keeping transformation out of the
+    plotting code.
     """
     _lf_band(ax, wl, YLF)
     ax.plot(wl, YHF.T, color="tab:blue", alpha=0.10, lw=0.5)
-    ax.plot(wl, YHF.mean(axis=0), color="tab:blue", lw=2, label="HF mean")
+    if hf_center is None:
+        hf_center = YHF.mean(axis=0)
+    ax.plot(wl, hf_center, color="tab:blue", lw=2, label=hf_label)
 
     # measured_err_lo / measured_err_hi are asymmetric error magnitudes
     # (always positive), not absolute bounds.
@@ -85,6 +131,8 @@ def draw_hf_lf_observed(ax, wl, YHF, YLF, obs, *, ylabel="Eclipse depth",
         label="Observed",
     )
     set_log_wavelength_axis(ax, wl)
+    if log_depth:
+        set_log_depth_axis(ax)
     ax.set_xlabel("Wavelength [um]")
     ax.set_ylabel(ylabel)
     ax.set_title(title)

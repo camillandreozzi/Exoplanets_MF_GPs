@@ -1,25 +1,33 @@
-"""Paired GPBoost Model 2 vs Model 1B comparisons.
+"""Paired GPBoost model comparisons: HF-only, Model 1A, Model 1B, Model 2.
 
 This experiment gives the GPBoost results their own clean comparison surface:
 
 - ``matched`` uses the same canonical LF subsample and CV point budget as the
   sklearn/mf_gp custom-kernel comparison, so its errors can be compared against
-  ``results/modelling/02_augmented_wavelength/cv/``.
+  ``results/modelling/02_augmented_wavelength/cv/``. It runs exact inference
+  (``gp_approx="none"``) and every multi-fidelity model consumes the identical
+  ``LF_SUBSAMPLE_SIZE`` LF rows (same seed, same ``select_lf_subsample`` draw).
 - ``max-data`` uses GPBoost's large-data approximation and a larger capped data
-  slice controlled by the configurable budgets below.
+  slice controlled by the configurable budgets below. Model 1A is skipped there
+  by default because its block-coordinate sweep refits the whole per-wavelength
+  stack several times; set ``GPBOOST_MAX_INCLUDE_MODEL1A=1`` to include it.
 
-Both modes hold out whole HF spectra on the same K-fold assignment and compare
-Model 2 (one wavelength-augmented AR(1) MF-GP) against the GPBoost Model 1B
-baseline (one AR(1) MF-GP per wavelength). The HF-only sklearn GP is included
-as a single-fidelity reference floor, matching the stage-1 comparison.
+All modes hold out whole HF spectra on the same K-fold assignment and compare
+Model 2 (one wavelength-augmented AR(1) MF-GP) against the GPBoost Model 1
+baselines (one AR(1) MF-GP per wavelength: 1A shares one rho across
+wavelengths, 1B fits a free rho_j per wavelength). The HF-only GPBoost GP is
+included as a single-fidelity reference floor. Per-model CV wall time is logged
+and written to the outputs.
 """
 
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -32,25 +40,25 @@ from exoplanets_mf.cv import (
     CVPredictions,
     compare_cv,
     cv_metrics,
-    cv_predict_hf_only_gp,
 )
 from exoplanets_mf.data import load_all
+from exoplanets_mf.gpboost_hf_only import cv_predict_hf_only_gpboost
 from exoplanets_mf.gpboost_mf import (
     GPBOOST_COV_FCT_SHAPE,
     GPBOOST_COV_FUNCTION,
-    GPBOOST_GP_APPROX,
-    GPBOOST_NUM_NEIGHBORS,
     cv_predict_model1_gpboost,
+    cv_predict_model1a_gpboost,
     gpboost_available,
 )
 from exoplanets_mf.gpboost_model2 import cv_predict_model2_gpboost
 from exoplanets_mf.instruments import instrument_mode_masks
+from exoplanets_mf.mf_gp import select_lf_subsample
 from exoplanets_mf.model2 import (
     MODEL2_CV_MAX_AUGMENTED_POINTS,
     derive_lambda_stride,
     select_wavelength_subgrid,
 )
-from exoplanets_mf.paths import MODELLING_RESULTS_DIR
+from exoplanets_mf.paths import MODELLING_RESULTS_DIR, approximation_suffix
 from exoplanets_mf.provenance import write_run_metadata
 from exoplanets_mf.reproducibility import LF_SUBSAMPLE_SIZE, RANDOM_SEED
 
@@ -69,9 +77,16 @@ DEFAULT_MAX_GP_APPROX = "vecchia"
 DEFAULT_MAX_NUM_NEIGHBORS = 30
 
 MODEL_LABELS = {
-    "hf_only": "HF-only GP (single-fidelity sklearn baseline)",
+    "hf_only": "HF-only GPBoost (single-fidelity baseline)",
+    "model_1a_gpboost": "Model 1A GPBoost (shared rho)",
     "model_1b_gpboost": "Model 1B GPBoost (per-wavelength rho)",
     "model_2_gpboost": "Model 2 GPBoost (wavelength-augmented scalar rho)",
+}
+MODEL_COLORS = {
+    "hf_only": "tab:gray",
+    "model_1a_gpboost": "tab:green",
+    "model_1b_gpboost": "tab:blue",
+    "model_2_gpboost": "tab:red",
 }
 
 
@@ -87,11 +102,63 @@ class ComparisonConfig:
     num_neighbors: int | None
     n_splits: int
     seed: int
+    include_model1a: bool = True
     progress_every: int | None = 40
 
     @property
     def output_dir(self) -> Path:
         return RESULTS_DIR / self.output_name
+
+
+GP_APPROX_CHOICES = (
+    "none",
+    "vecchia",
+    "vecchia_euclidean",
+    "full_scale_vecchia",
+    "fitc",
+    "tapering",
+)
+_UNSET = object()  # "--num-neighbors was not given" vs "was given as none"
+
+
+def with_approximation(
+    config: "ComparisonConfig",
+    gp_approx: str | None,
+    num_neighbors: int | None | object,
+) -> "ComparisonConfig":
+    """Apply CLI overrides, redirecting the output to its own directory.
+
+    A mode's outputs are only comparable within one approximation, so an
+    overridden run never writes into the directory of the mode's default.
+    """
+    if gp_approx is None and num_neighbors is _UNSET:
+        return config
+    new_approx = config.gp_approx if gp_approx is None else gp_approx
+    new_neighbors = (
+        config.num_neighbors if num_neighbors is _UNSET else num_neighbors
+    )
+    if new_approx == "none":
+        new_neighbors = None  # neighbours are meaningless without Vecchia
+    if (new_approx, new_neighbors) == (config.gp_approx, config.num_neighbors):
+        return config
+    return replace(
+        config,
+        gp_approx=new_approx,
+        num_neighbors=new_neighbors,
+        output_name=config.output_name
+        + approximation_suffix(new_approx, new_neighbors, default=config.gp_approx),
+        description=(
+            f"{config.description} Approximation overridden on the command "
+            f"line to gp_approx={new_approx!r}, num_neighbors={new_neighbors}."
+        ),
+    )
+
+
+def _env_flag(name: str, default: bool) -> bool:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on"}
 
 
 def _env_int(name: str, default: int) -> int:
@@ -126,22 +193,37 @@ def _env_subsample_size(name: str, default: str, n_available: int) -> int | None
     return min(value, n_available)
 
 
-def build_config(mode: str, *, n_lf: int) -> ComparisonConfig:
+def build_config(
+    mode: str,
+    *,
+    n_lf: int,
+    gp_approx: str | None = None,
+    num_neighbors: int | None | object = _UNSET,
+) -> ComparisonConfig:
+    base = _build_mode_config(mode, n_lf=n_lf)
+    return with_approximation(base, gp_approx, num_neighbors)
+
+
+def _build_mode_config(mode: str, *, n_lf: int) -> ComparisonConfig:
     if mode == MATCHED_MODE:
         return ComparisonConfig(
             mode=mode,
             output_name="matched_subsample",
             description=(
                 "GPBoost comparison on the canonical LF subsample used by the "
-                "sklearn/mf_gp custom-kernel comparison."
+                "sklearn/mf_gp custom-kernel comparison, with exact inference "
+                "(gp_approx='none') and the identical LF rows in every "
+                "multi-fidelity model."
             ),
             model1_subsample_size=LF_SUBSAMPLE_SIZE,
             model2_lf_sample_size=LF_SUBSAMPLE_SIZE,
             model2_max_augmented_points=MODEL2_CV_MAX_AUGMENTED_POINTS,
-            gp_approx=GPBOOST_GP_APPROX,
-            num_neighbors=GPBOOST_NUM_NEIGHBORS,
+            # Exact inference: no Vecchia/inducing-point approximation.
+            gp_approx="none",
+            num_neighbors=None,
             n_splits=CV_FULL_MODEL_SPLITS,
             seed=RANDOM_SEED,
+            include_model1a=True,
         )
     if mode == MAX_DATA_MODE:
         model1_subsample_size = _env_subsample_size(
@@ -173,6 +255,7 @@ def build_config(mode: str, *, n_lf: int) -> ComparisonConfig:
             ),
             n_splits=_env_int("GPBOOST_MAX_N_SPLITS", CV_FULL_MODEL_SPLITS),
             seed=RANDOM_SEED,
+            include_model1a=_env_flag("GPBOOST_MAX_INCLUDE_MODEL1A", False),
         )
     raise ValueError(f"unknown mode {mode!r}")
 
@@ -193,6 +276,22 @@ def n_augmented_points(
 
 def actual_lf_count(subsample_size: int | None, n_lf: int) -> int:
     return n_lf if subsample_size is None else int(subsample_size)
+
+
+def lf_indices_checksum(subsample_size: int | None, n_lf: int, seed: int) -> str:
+    """Fingerprint of the LF rows every multi-fidelity model draws.
+
+    Model 1A, Model 1B and Model 2 all select their LF rows with
+    ``mf_gp.select_lf_subsample(n_lf, size, seed=seed)``, so equal sizes and
+    seeds mean literally the same rows. The checksum records which rows the
+    run used.
+    """
+    indices = (
+        np.arange(n_lf)
+        if subsample_size is None
+        else select_lf_subsample(n_lf, int(subsample_size), seed=seed)
+    )
+    return hashlib.sha256(np.ascontiguousarray(indices, dtype=np.int64)).hexdigest()
 
 
 def max_train_hf_count(n_samples: int, n_splits: int) -> int:
@@ -248,11 +347,7 @@ def plot_diagnostics(
 ) -> None:
     fig, axes = plt.subplots(2, 2, figsize=(13, 9))
 
-    colors = {
-        "hf_only": "tab:gray",
-        "model_1b_gpboost": "tab:blue",
-        "model_2_gpboost": "tab:red",
-    }
+    colors = MODEL_COLORS
 
     ax = axes[0, 0]
     shade_instrument_modes(ax, wavelengths)
@@ -318,22 +413,17 @@ def plot_diagnostics(
     )
 
     ax = axes[1, 1]
-    ax.scatter(
-        Y_hf.ravel(),
-        predictions["model_1b_gpboost"].y_pred.ravel(),
-        s=2,
-        alpha=0.1,
-        color="tab:blue",
-        label=MODEL_LABELS["model_1b_gpboost"],
-    )
-    ax.scatter(
-        Y_hf.ravel(),
-        predictions["model_2_gpboost"].y_pred.ravel(),
-        s=2,
-        alpha=0.1,
-        color="tab:red",
-        label=MODEL_LABELS["model_2_gpboost"],
-    )
+    for key in predictions:
+        if key == "hf_only":
+            continue
+        ax.scatter(
+            Y_hf.ravel(),
+            predictions[key].y_pred.ravel(),
+            s=2,
+            alpha=0.1,
+            color=colors[key],
+            label=MODEL_LABELS[key],
+        )
     limits = [Y_hf.min(), Y_hf.max()]
     ax.plot(limits, limits, color="black", lw=0.8, ls="--")
     ax.set(
@@ -359,27 +449,37 @@ def write_outputs(
     model2_stride_sizing_points: int,
     model2_max_fold_points: int,
     n_lf_total: int,
+    runtime_seconds: dict[str, float],
+    lf_subsample_checksum: str,
 ) -> None:
     output_dir = config.output_dir
     output_dir.mkdir(parents=True, exist_ok=True)
 
     comparisons = {
-        "hf_only": compare_cv(
+        key: compare_cv(
             Y_hf,
-            predictions["hf_only"],
+            predictions[key],
             predictions["model_2_gpboost"],
-            labels=(MODEL_LABELS["hf_only"], MODEL_LABELS["model_2_gpboost"]),
-        ),
-        "model_1b_gpboost": compare_cv(
-            Y_hf,
-            predictions["model_1b_gpboost"],
-            predictions["model_2_gpboost"],
-            labels=(
-                MODEL_LABELS["model_1b_gpboost"],
-                MODEL_LABELS["model_2_gpboost"],
-            ),
-        ),
+            labels=(MODEL_LABELS[key], MODEL_LABELS["model_2_gpboost"]),
+        )
+        for key in predictions
+        if key != "model_2_gpboost"
     }
+    # Model 1A vs 1B is the shared-rho question on the GPBoost side; it is
+    # reported separately because the table above is all "X vs Model 2".
+    comparison_1a_vs_1b = (
+        compare_cv(
+            Y_hf,
+            predictions["model_1a_gpboost"],
+            predictions["model_1b_gpboost"],
+            labels=(
+                MODEL_LABELS["model_1a_gpboost"],
+                MODEL_LABELS["model_1b_gpboost"],
+            ),
+        )
+        if "model_1a_gpboost" in predictions
+        else None
+    )
     all_metrics = {key: cv_metrics(Y_hf, value) for key, value in predictions.items()}
 
     per_wavelength = {"wavelength": wavelengths}
@@ -417,11 +517,18 @@ def write_outputs(
         "gp_approx": config.gp_approx,
         "num_neighbors": config.num_neighbors,
         "total_lf_rows_available": int(n_lf_total),
+        "model_1_lf_sample_size": actual_lf_count(
+            config.model1_subsample_size, n_lf_total
+        ),
         "model_1b_lf_sample_size": actual_lf_count(
             config.model1_subsample_size, n_lf_total
         ),
         "model_1b_subsample_is_all_lf": config.model1_subsample_size is None,
         "model_2_lf_sample_size": config.model2_lf_sample_size,
+        "lf_subsample_shared_by_all_mf_models": (
+            config.model1_subsample_size == config.model2_lf_sample_size
+        ),
+        "lf_subsample_indices_sha256": lf_subsample_checksum,
         "model_2_max_augmented_points": config.model2_max_augmented_points,
         "model_2_lambda_stride": lambda_stride,
         "model_2_stride_sizing_augmented_points": model2_stride_sizing_points,
@@ -436,6 +543,14 @@ def write_outputs(
         },
         "comparisons_vs_model_2": {
             key: comparison_summary(value) for key, value in comparisons.items()
+        },
+        "comparison_model_1a_vs_1b": (
+            comparison_summary(comparison_1a_vs_1b)
+            if comparison_1a_vs_1b is not None
+            else None
+        ),
+        "runtime_seconds": {
+            key: round(value, 1) for key, value in runtime_seconds.items()
         },
     }
     (output_dir / "cv_summary.json").write_text(
@@ -464,6 +579,7 @@ def write_outputs(
         output_dir / "CV_REPORT.md",
         summary=summary,
         comparisons=comparisons,
+        comparison_1a_vs_1b=comparison_1a_vs_1b,
     )
     write_run_metadata(
         output_dir / "run_metadata.json",
@@ -480,11 +596,19 @@ def pct(value: float) -> str:
     return f"{100.0 * value:.1f}%"
 
 
+def format_duration(seconds: float) -> str:
+    minutes, secs = divmod(float(seconds), 60.0)
+    if minutes < 1:
+        return f"{secs:.1f}s"
+    return f"{int(minutes)}m {secs:04.1f}s"
+
+
 def write_report(
     savepath: Path,
     *,
     summary: dict,
     comparisons: dict[str, CVComparison],
+    comparison_1a_vs_1b: CVComparison | None = None,
 ) -> None:
     rows = []
     for key, comparison in comparisons.items():
@@ -511,6 +635,30 @@ def write_report(
         f"- {MODEL_LABELS[key]}: {pct(value)} (nominal 95%)"
         for key, value in summary["coverage_95"].items()
     )
+    runtime_lines = "\n".join(
+        f"| {MODEL_LABELS.get(key, key)} | {format_duration(value)} |"
+        for key, value in summary["runtime_seconds"].items()
+    )
+    if comparison_1a_vs_1b is None:
+        rho_section = ""
+    else:
+        winner = (
+            MODEL_LABELS["model_1b_gpboost"]
+            if comparison_1a_vs_1b.delta_rmse_pooled < 0
+            else MODEL_LABELS["model_1a_gpboost"]
+        )
+        rho_section = f"""
+### Shared rho vs per-wavelength rho (Model 1A vs 1B)
+
+Delta is Model 1B minus Model 1A, so negative deltas mean 1B wins.
+
+| Model 1A RMSE | Model 1B RMSE | Delta | 1B wins by sample | Winner |
+|---:|---:|---:|---:|---|
+| {fmt(comparison_1a_vs_1b.metrics_1.rmse_pooled)} \
+| {fmt(comparison_1a_vs_1b.metrics_2.rmse_pooled)} \
+| {fmt(comparison_1a_vs_1b.delta_rmse_pooled)} \
+| {pct(comparison_1a_vs_1b.fraction_samples_model2_wins)} | {winner} |
+"""
     report = f"""# GPBoost CV Report: {summary["result_set"]}
 
 ## Result
@@ -525,6 +673,14 @@ Model 2 minus the baseline, so negative deltas mean Model 2 wins.
 95% CI coverage of models with predictive uncertainties:
 
 {coverage_lines}
+{rho_section}
+## Runtime
+
+Wall time of each model's complete {summary["n_splits"]}-fold CV.
+
+| Model | CV wall time |
+|---|---:|
+{runtime_lines}
 
 ## Configuration
 
@@ -533,7 +689,8 @@ Model 2 minus the baseline, so negative deltas mean Model 2 wins.
 - CV protocol: {summary["n_splits"]}-fold over {summary["n_samples"]} paired HF spectra, seed `{summary["seed"]}`.
 - GPBoost covariance: `{summary["cov_function"]}` with `cov_fct_shape={summary["cov_fct_shape"]}`.
 - GPBoost approximation: `gp_approx={summary["gp_approx"]}`, `num_neighbors={summary["num_neighbors"]}`.
-- Model 1B LF rows: {summary["model_1b_lf_sample_size"]} of {summary["total_lf_rows_available"]}.
+- Model 1A/1B LF rows: {summary["model_1b_lf_sample_size"]} of {summary["total_lf_rows_available"]}.
+- Identical LF rows in every multi-fidelity model: {summary["lf_subsample_shared_by_all_mf_models"]} (index sha256 `{summary["lf_subsample_indices_sha256"][:16]}`).
 - Model 2 LF rows: {summary["model_2_lf_sample_size"]} of {summary["total_lf_rows_available"]}; wavelength stride {summary["model_2_lambda_stride"]}; {summary["model_2_max_cv_fold_augmented_points"]} augmented scalar rows in the largest CV fold.
 - Model 2 stride was sized against {summary["model_2_stride_sizing_augmented_points"]} augmented scalar rows, using all HF rows as the conservative budget check.
 
@@ -548,7 +705,12 @@ Model 2 minus the baseline, so negative deltas mean Model 2 wins.
     savepath.write_text(report, encoding="utf-8")
 
 
-def run(mode: str) -> None:
+def run(
+    mode: str,
+    *,
+    gp_approx: str | None = None,
+    num_neighbors: int | None | object = _UNSET,
+) -> None:
     data = load_all()
     wavelengths = data["wavelengths"]
     sample_labels = data["YHF"].index.to_numpy()
@@ -557,7 +719,9 @@ def run(mode: str) -> None:
     X_hf = data["XHF"].to_numpy()
     Y_hf = data["YHF"].to_numpy()
 
-    config = build_config(mode, n_lf=len(X_lf))
+    config = build_config(
+        mode, n_lf=len(X_lf), gp_approx=gp_approx, num_neighbors=num_neighbors
+    )
     config.output_dir.mkdir(parents=True, exist_ok=True)
     if not gpboost_available():
         message = (
@@ -587,54 +751,110 @@ def run(mode: str) -> None:
         lambda_stride,
     )
 
+    model1_lf = actual_lf_count(config.model1_subsample_size, len(X_lf))
     print(
-        f"GPBoost {config.mode} CV: model1_lf="
-        f"{actual_lf_count(config.model1_subsample_size, len(X_lf))}, "
+        f"GPBoost {config.mode} CV: model1_lf={model1_lf}, "
         f"model2_lf={config.model2_lf_sample_size}, "
         f"model2_stride={lambda_stride}, gp_approx={config.gp_approx}, "
-        f"n_splits={config.n_splits}"
+        f"n_splits={config.n_splits}, "
+        f"model_1a={'on' if config.include_model1a else 'off'}"
+    )
+    if (
+        config.include_model1a
+        and config.model1_subsample_size != config.model2_lf_sample_size
+    ):
+        print(
+            "  NOTE: Model 1 and Model 2 use different LF sample sizes; the "
+            "LF rows are not matched in this mode.",
+            flush=True,
+        )
+    lf_subsample_checksum = lf_indices_checksum(
+        config.model1_subsample_size, len(X_lf), config.seed
     )
 
-    predictions = {}
-    print("  HF-only baseline CV ...", flush=True)
-    predictions["hf_only"] = cv_predict_hf_only_gp(
-        X_hf,
-        Y_hf,
-        wavelengths,
-        n_splits=config.n_splits,
-        seed=config.seed,
+    predictions: dict[str, CVPredictions] = {}
+    runtime_seconds: dict[str, float] = {}
+
+    def timed(key: str, fn) -> None:
+        print(f"  {MODEL_LABELS[key]} CV ...", flush=True)
+        t0 = time.perf_counter()
+        predictions[key] = fn()
+        runtime_seconds[key] = time.perf_counter() - t0
+        print(
+            f"  {MODEL_LABELS[key]} CV finished in "
+            f"{format_duration(runtime_seconds[key])}",
+            flush=True,
+        )
+
+    run_started = time.perf_counter()
+
+    timed(
+        "hf_only",
+        lambda: cv_predict_hf_only_gpboost(
+            X_hf,
+            Y_hf,
+            wavelengths,
+            n_splits=config.n_splits,
+            seed=config.seed,
+            gp_approx=config.gp_approx,
+            num_neighbors=config.num_neighbors,
+        ),
     )
 
-    print("  Model 1B GPBoost CV ...", flush=True)
-    predictions["model_1b_gpboost"] = cv_predict_model1_gpboost(
-        X_lf,
-        Y_lf,
-        X_hf,
-        Y_hf,
-        wavelengths,
-        seed=config.seed,
-        subsample_size=config.model1_subsample_size,
-        n_splits=config.n_splits,
-        progress_every=config.progress_every,
-        gp_approx=config.gp_approx,
-        num_neighbors=config.num_neighbors,
+    if config.include_model1a:
+        timed(
+            "model_1a_gpboost",
+            lambda: cv_predict_model1a_gpboost(
+                X_lf,
+                Y_lf,
+                X_hf,
+                Y_hf,
+                wavelengths,
+                seed=config.seed,
+                subsample_size=config.model1_subsample_size,
+                n_splits=config.n_splits,
+                progress=True,
+                gp_approx=config.gp_approx,
+                num_neighbors=config.num_neighbors,
+            ),
+        )
+
+    timed(
+        "model_1b_gpboost",
+        lambda: cv_predict_model1_gpboost(
+            X_lf,
+            Y_lf,
+            X_hf,
+            Y_hf,
+            wavelengths,
+            seed=config.seed,
+            subsample_size=config.model1_subsample_size,
+            n_splits=config.n_splits,
+            progress_every=config.progress_every,
+            gp_approx=config.gp_approx,
+            num_neighbors=config.num_neighbors,
+        ),
     )
 
-    print("  Model 2 GPBoost CV ...", flush=True)
-    predictions["model_2_gpboost"] = cv_predict_model2_gpboost(
-        X_lf,
-        Y_lf,
-        X_hf,
-        Y_hf,
-        wavelengths,
-        seed=config.seed,
-        lf_sample_size=config.model2_lf_sample_size,
-        lambda_stride=lambda_stride,
-        n_splits=config.n_splits,
-        progress=True,
-        gp_approx=config.gp_approx,
-        num_neighbors=config.num_neighbors,
+    timed(
+        "model_2_gpboost",
+        lambda: cv_predict_model2_gpboost(
+            X_lf,
+            Y_lf,
+            X_hf,
+            Y_hf,
+            wavelengths,
+            seed=config.seed,
+            lf_sample_size=config.model2_lf_sample_size,
+            lambda_stride=lambda_stride,
+            n_splits=config.n_splits,
+            progress=True,
+            gp_approx=config.gp_approx,
+            num_neighbors=config.num_neighbors,
+        ),
     )
+
+    runtime_seconds["total"] = time.perf_counter() - run_started
 
     for key, prediction in predictions.items():
         assert_same_cv_assignment(
@@ -651,6 +871,15 @@ def run(mode: str) -> None:
         model2_stride_sizing_points=model2_stride_sizing_points,
         model2_max_fold_points=model2_max_fold_points,
         n_lf_total=len(X_lf),
+        runtime_seconds=runtime_seconds,
+        lf_subsample_checksum=lf_subsample_checksum,
+    )
+    print(
+        "runtime: "
+        + ", ".join(
+            f"{key}={format_duration(value)}"
+            for key, value in runtime_seconds.items()
+        )
     )
     print(f"outputs written to {config.output_dir}")
 
@@ -666,12 +895,45 @@ def parse_args() -> argparse.Namespace:
             "max-data: configurable larger GPBoost/Vecchia run"
         ),
     )
+    parser.add_argument(
+        "--gp-approx",
+        choices=GP_APPROX_CHOICES,
+        default=None,
+        help=(
+            "override the mode's GPBoost approximation (matched defaults to "
+            "'none', max-data to 'vecchia'). An overridden run writes to its "
+            "own output directory, e.g. matched_subsample_vecchia_k30."
+        ),
+    )
+    parser.add_argument(
+        "--num-neighbors",
+        default=None,
+        help=(
+            "Vecchia neighbours: an integer, or 'none' for GPBoost's internal "
+            "default. Ignored when gp_approx is 'none'."
+        ),
+    )
     return parser.parse_args()
+
+
+def parse_num_neighbors(raw: str | None) -> int | None | object:
+    if raw is None:
+        return _UNSET
+    if raw.strip().lower() in {"none", "null", "default"}:
+        return None
+    value = int(raw)
+    if value <= 0:
+        raise ValueError(f"--num-neighbors must be positive; found {value}")
+    return value
 
 
 def main() -> None:
     args = parse_args()
-    run(args.mode)
+    run(
+        args.mode,
+        gp_approx=args.gp_approx,
+        num_neighbors=parse_num_neighbors(args.num_neighbors),
+    )
 
 
 if __name__ == "__main__":

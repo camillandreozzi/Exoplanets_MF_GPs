@@ -12,6 +12,7 @@ Model 2 GPBoost variant's own fit, hyperparameters, timing, and 5-fold CV
 metrics. Skips cleanly when gpboost is unavailable.
 """
 
+import argparse
 import json
 import time
 
@@ -34,10 +35,11 @@ from exoplanets_mf.model2 import (
     MODEL2_MAX_AUGMENTED_POINTS,
     derive_lambda_stride,
 )
-from exoplanets_mf.paths import MODELLING_RESULTS_DIR
+from exoplanets_mf.paths import MODELLING_RESULTS_DIR, approximation_suffix
 from exoplanets_mf.reproducibility import LF_SUBSAMPLE_SIZE, RANDOM_SEED
 
-OUTPUT_DIR = MODELLING_RESULTS_DIR / "02_augmented_wavelength" / "model2_gpboost"
+OUTPUT_ROOT = MODELLING_RESULTS_DIR / "02_augmented_wavelength"
+OUTPUT_STEM = "model2_gpboost"
 
 SEED = RANDOM_SEED
 # Match the sklearn Model 2 configuration (01_fit_model2.py / 02_cv_*): the one
@@ -90,13 +92,60 @@ def plot_diagnostics(layer, X_hf, Y_hf, input_names, savepath) -> None:
     plt.close(fig)
 
 
+
+
+GP_APPROX_CHOICES = (
+    "none",
+    "vecchia",
+    "vecchia_euclidean",
+    "full_scale_vecchia",
+    "fitc",
+    "tapering",
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--gp-approx",
+        choices=GP_APPROX_CHOICES,
+        default="none",
+        help=(
+            "GPBoost large-data approximation (default: exact inference). "
+            "A non-default choice writes to its own output directory, e.g. "
+            "model2_gpboost_vecchia_k30."
+        ),
+    )
+    parser.add_argument(
+        "--num-neighbors",
+        default=None,
+        help=(
+            "Vecchia neighbours: an integer, or 'none' for GPBoost's internal "
+            "default. Ignored when --gp-approx is 'none'."
+        ),
+    )
+    args = parser.parse_args()
+    if args.gp_approx == "none":
+        args.num_neighbors = None
+    elif args.num_neighbors is not None:
+        if str(args.num_neighbors).strip().lower() in {"none", "null", "default"}:
+            args.num_neighbors = None
+        else:
+            args.num_neighbors = int(args.num_neighbors)
+    return args
+
+
 def main() -> None:
+    args = parse_args()
+    output_dir = OUTPUT_ROOT / (
+        OUTPUT_STEM + approximation_suffix(args.gp_approx, args.num_neighbors)
+    )
     if not gpboost_available():
         print("gpboost not available -- skipping Model 2 GPBoost variant.")
         print("  (install gpboost and run tools/fix_gpboost_libomp.py; see README)")
         return
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     data = load_all()
     wavelengths = data["wavelengths"]
     XLF_10k = data["XLF_10k"].to_numpy()
@@ -130,6 +179,8 @@ def main() -> None:
         seed=SEED,
         lf_sample_size=LF_SAMPLE_SIZE,
         lambda_stride=lambda_stride,
+        gp_approx=args.gp_approx,
+        num_neighbors=args.num_neighbors,
     )
     elapsed = time.perf_counter() - t0
     n_points = layer.model.n_points
@@ -140,10 +191,10 @@ def main() -> None:
     table = hyperparameter_table_model2_gpboost(
         layer, n_points=n_points, lambda_stride=lambda_stride
     )
-    table.to_csv(OUTPUT_DIR / "model2_gpboost_hyperparameters.csv", index=False)
-    joblib.dump(layer, OUTPUT_DIR / "model2_gpboost_layer.joblib")
+    table.to_csv(output_dir / "model2_gpboost_hyperparameters.csv", index=False)
+    joblib.dump(layer, output_dir / "model2_gpboost_layer.joblib")
     plot_diagnostics(
-        layer, XHF, YHF, input_names, OUTPUT_DIR / "03_model2_gpboost_diagnostics.png"
+        layer, XHF, YHF, input_names, output_dir / "03_model2_gpboost_diagnostics.png"
     )
 
     print(f"5-fold CV (stride {cv_lambda_stride}, {CV_LF_SAMPLE_SIZE} LF) ...")
@@ -157,6 +208,8 @@ def main() -> None:
         seed=SEED,
         lf_sample_size=CV_LF_SAMPLE_SIZE,
         lambda_stride=cv_lambda_stride,
+        gp_approx=args.gp_approx,
+        num_neighbors=args.num_neighbors,
         progress=True,
     )
     cv_seconds = time.perf_counter() - t0
@@ -166,10 +219,12 @@ def main() -> None:
         f"NRMSE={metrics.nrmse_pooled:.4f}, coverage95={metrics.coverage_95:.3f}"
     )
 
-    (OUTPUT_DIR / "cv_summary.json").write_text(
+    (output_dir / "cv_summary.json").write_text(
         json.dumps(
             {
                 "cov_function": layer.cov_function,
+                "gp_approx": args.gp_approx,
+                "num_neighbors": args.num_neighbors,
                 "n_samples": int(YHF.shape[0]),
                 "n_splits": predictions.n_splits,
                 "fit_n_points": int(n_points),
@@ -188,7 +243,7 @@ def main() -> None:
             indent=2,
         )
     )
-    print(f"outputs written to {OUTPUT_DIR}")
+    print(f"outputs written to {output_dir}")
 
 
 if __name__ == "__main__":

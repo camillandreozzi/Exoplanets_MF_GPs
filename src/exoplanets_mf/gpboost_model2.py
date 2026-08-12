@@ -15,6 +15,7 @@ from exoplanets_mf.gpboost_mf import (
     GPBOOST_COV_FCT_SHAPE,
     GPBOOST_COV_FUNCTION,
     GPBOOST_GP_APPROX,
+    GPBOOST_HEURISTIC_INIT,
     GPBOOST_NUM_NEIGHBORS,
     _fit_gpboost_ar1,
     _model_to_payload,
@@ -92,6 +93,7 @@ def fit_model2_gpboost(
     trace: bool = False,
     num_parallel_threads: int | None = None,
     fidelity_specific_mean: bool = True,
+    heuristic_init: bool = GPBOOST_HEURISTIC_INIT,
 ) -> GPBoostModel2Layer:
     """Fit GPBoost's native AR(1) covariance on Model 2's augmented design."""
     X_lf = np.asarray(X_lf, dtype=float)
@@ -155,6 +157,7 @@ def fit_model2_gpboost(
         trace=trace,
         num_parallel_threads=num_parallel_threads,
         fidelity_specific_mean=fidelity_specific_mean,
+        heuristic_init=heuristic_init,
     )
     fit_seconds = time.perf_counter() - t0
 

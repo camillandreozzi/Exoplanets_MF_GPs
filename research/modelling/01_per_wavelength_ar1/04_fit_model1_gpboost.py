@@ -15,6 +15,7 @@ metrics.
 Skips cleanly (no error) when gpboost is unavailable.
 """
 
+import argparse
 import json
 import time
 
@@ -31,10 +32,11 @@ from exoplanets_mf.gpboost_mf import (
     hyperparameter_table_model1_gpboost,
     predict_hf_model1_gpboost,
 )
-from exoplanets_mf.paths import MODELLING_RESULTS_DIR
+from exoplanets_mf.paths import MODELLING_RESULTS_DIR, approximation_suffix
 from exoplanets_mf.reproducibility import LF_SUBSAMPLE_SIZE, RANDOM_SEED
 
-OUTPUT_DIR = MODELLING_RESULTS_DIR / "01_per_wavelength_ar1" / "model1_gpboost"
+OUTPUT_ROOT = MODELLING_RESULTS_DIR / "01_per_wavelength_ar1"
+OUTPUT_STEM = "model1_gpboost"
 
 # The one canonical LF subsample shared by every model and CV (see
 # reproducibility.LF_SUBSAMPLE_SIZE); mirrors the sklearn Model 1B scripts.
@@ -76,13 +78,60 @@ def plot_diagnostics(table, savepath) -> None:
     plt.close(fig)
 
 
+
+
+GP_APPROX_CHOICES = (
+    "none",
+    "vecchia",
+    "vecchia_euclidean",
+    "full_scale_vecchia",
+    "fitc",
+    "tapering",
+)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--gp-approx",
+        choices=GP_APPROX_CHOICES,
+        default="none",
+        help=(
+            "GPBoost large-data approximation (default: exact inference). "
+            "A non-default choice writes to its own output directory, e.g. "
+            "model1_gpboost_vecchia_k30."
+        ),
+    )
+    parser.add_argument(
+        "--num-neighbors",
+        default=None,
+        help=(
+            "Vecchia neighbours: an integer, or 'none' for GPBoost's internal "
+            "default. Ignored when --gp-approx is 'none'."
+        ),
+    )
+    args = parser.parse_args()
+    if args.gp_approx == "none":
+        args.num_neighbors = None
+    elif args.num_neighbors is not None:
+        if str(args.num_neighbors).strip().lower() in {"none", "null", "default"}:
+            args.num_neighbors = None
+        else:
+            args.num_neighbors = int(args.num_neighbors)
+    return args
+
+
 def main() -> None:
+    args = parse_args()
+    output_dir = OUTPUT_ROOT / (
+        OUTPUT_STEM + approximation_suffix(args.gp_approx, args.num_neighbors)
+    )
     if not gpboost_available():
         print("gpboost not available -- skipping Model 1 GPBoost variant.")
         print("  (install gpboost and run tools/fix_gpboost_libomp.py; see README)")
         return
 
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     data = load_all()
     XLF_10k = data["XLF_10k"].to_numpy()
     YLF_10k = data["YLF_10k"].to_numpy()
@@ -103,6 +152,8 @@ def main() -> None:
         wavelengths,
         seed=SEED,
         subsample_size=SUBSAMPLE_SIZE,
+        gp_approx=args.gp_approx,
+        num_neighbors=args.num_neighbors,
         progress_every=40,
     )
     elapsed = time.perf_counter() - t0
@@ -114,9 +165,9 @@ def main() -> None:
     )
 
     table = hyperparameter_table_model1_gpboost(layer)
-    table.to_csv(OUTPUT_DIR / "model1_gpboost_hyperparameters.csv", index=False)
-    joblib.dump(layer, OUTPUT_DIR / "model1_gpboost_layer.joblib")
-    plot_diagnostics(table, OUTPUT_DIR / "04_model1_gpboost_diagnostics.png")
+    table.to_csv(output_dir / "model1_gpboost_hyperparameters.csv", index=False)
+    joblib.dump(layer, output_dir / "model1_gpboost_layer.joblib")
+    plot_diagnostics(table, output_dir / "04_model1_gpboost_diagnostics.png")
 
     print(f"5-fold CV ({CV_SUBSAMPLE_SIZE} LF testing config) ...")
     t0 = time.perf_counter()
@@ -128,6 +179,8 @@ def main() -> None:
         wavelengths,
         seed=SEED,
         subsample_size=CV_SUBSAMPLE_SIZE,
+        gp_approx=args.gp_approx,
+        num_neighbors=args.num_neighbors,
     )
     cv_seconds = time.perf_counter() - t0
     metrics = cv_metrics(YHF, predictions)
@@ -136,10 +189,12 @@ def main() -> None:
         f"NRMSE={metrics.nrmse_pooled:.4f}, coverage95={metrics.coverage_95:.3f}"
     )
 
-    (OUTPUT_DIR / "cv_summary.json").write_text(
+    (output_dir / "cv_summary.json").write_text(
         json.dumps(
             {
                 "cov_function": layer.cov_function,
+                "gp_approx": args.gp_approx,
+                "num_neighbors": args.num_neighbors,
                 "n_wavelengths": int(len(wavelengths)),
                 "n_samples": int(YHF.shape[0]),
                 "n_splits": predictions.n_splits,
@@ -159,7 +214,7 @@ def main() -> None:
             indent=2,
         )
     )
-    print(f"outputs written to {OUTPUT_DIR}")
+    print(f"outputs written to {output_dir}")
 
 
 if __name__ == "__main__":

@@ -25,3 +25,21 @@ MODELLING_RESULTS_DIR = RESULTS_DIR / "modelling"
 LOG_MODELLING_RESULTS_DIR = RESULTS_DIR / "log_modelling"
 VALIDATION_RESULTS_DIR = RESULTS_DIR / "validation"
 PARAMETERS_RESULTS_DIR = RESULTS_DIR / "parameters"
+
+
+def approximation_suffix(
+    gp_approx: str, num_neighbors: int | None, *, default: str = "none"
+) -> str:
+    """Output-directory suffix identifying a GPBoost approximation.
+
+    Exact and approximate fits of the same model are different estimators, so
+    they must not overwrite each other's outputs. A run at the workflow's
+    default approximation keeps the plain directory name (empty suffix);
+    anything else is labelled, e.g. ``_vecchia_k30``.
+    """
+    if gp_approx == default:
+        return ""
+    if gp_approx == "none":
+        return "_exact"
+    suffix = f"_{gp_approx}"
+    return suffix if num_neighbors is None else f"{suffix}_k{num_neighbors}"
