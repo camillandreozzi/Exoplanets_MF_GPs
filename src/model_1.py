@@ -11,11 +11,18 @@ _model1 = None
 _model1_HF_only = None
 _model1_metadata = {}
 _model1_last_prediction = None
+GP_THREADS = 1
 
 
 # the matrix that passes as training data must have 11 columns
 # 9 atmospheric parameters, 1 column for the fidelity indicator, and 1 column for the response variable (scalar)
-def fit_model1(train_data, HF_only= False):
+def fit_model1(train_data, HF_only= False, init_cov_pars=None):
+    """Fit the Model 1 GP.
+
+    ``init_cov_pars`` seeds the covariance-parameter optimiser, e.g. with the
+    values fitted on a neighbouring leave-one-out fold. It only changes where
+    the optimiser starts, not the data it is fit to; see ``model1_cov_pars``.
+    """
     global _model1, _model1_HF_only, _model1_metadata, _model1_last_prediction
 
     # Input coordinates only: exclude fidelity indicator and response column
@@ -39,16 +46,18 @@ def fit_model1(train_data, HF_only= False):
         # Gaussian Process for high-fidelity data only
         gp_model = gpb.GPModel(gp_coords= x_train, cov_function = "matern", 
                        cov_fct_shape= 1.5, gp_approx = "vecchia", num_neighbors=20, 
-                       likelihood="gaussian")
+                       likelihood="gaussian",
+                       num_parallel_threads=GP_THREADS)
 
 
     else:
         # MF AR(1) model for both high-fidelity and low-fidelity data
         gp_model = gpb.GPModel(gp_coords= coords_train_mf, cov_function = "ar1_mf_matern", 
                        cov_fct_shape= 1.5, gp_approx = "vecchia", num_neighbors=20, 
-                       likelihood="gaussian")
+                       likelihood="gaussian",
+                       num_parallel_threads=GP_THREADS)
         
-    gp_model.fit(y=y_train, X=x_train)
+    gp_model.fit(y=y_train, X=x_train, params=_gp_fit_params(init_cov_pars))
     _model1 = gp_model
     _model1_HF_only = HF_only
     _model1_metadata = _get_model1_metadata(train_data, HF_only)
@@ -96,6 +105,18 @@ def predict_model1(validation_data, HF_only= False, compute_metrics=True):
     }
 
     return prediction
+
+
+def model1_cov_pars(gp_model):
+    """Fitted covariance parameters, in the order ``init_cov_pars`` expects."""
+    return np.asarray(gp_model.get_cov_pars(std_err=False), dtype=float).ravel()
+
+
+def _gp_fit_params(init_cov_pars):
+    params = {"trace": False}
+    if init_cov_pars is not None:
+        params["init_cov_pars"] = np.asarray(init_cov_pars, dtype=float)
+    return params
 
 
 def save_model1(filename):

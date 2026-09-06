@@ -31,14 +31,10 @@ def load_full_data(data_dir=DATA_DIR):
     x_hf = pd.read_csv(data_dir / "XHF.csv", skipinitialspace=True)
     x_hf.columns = x_hf.columns.str.strip()
 
-    x_lf = pd.read_csv(
-        data_dir / "XLF_10k.csv",
-        header=None,
-        names=x_hf.columns,
-    )
+    x_lf = load_lf_predictors(data_dir, x_hf.columns)
 
     y_hf = pd.read_csv(data_dir / "YHF.csv", index_col=0)
-    y_lf = pd.read_csv(data_dir / "YLF_10k.csv")
+    y_lf = pd.read_csv(first_existing_file(data_dir, ["YLF10k.csv", "YLF_10k.csv"]))
 
     response_columns = [f"response_{i}" for i in range(RESPONSE_DIM)]
     wavelength_map = load_wavelength_map(data_dir)
@@ -62,6 +58,34 @@ def load_full_data(data_dir=DATA_DIR):
     full_data = pd.concat([lf_data, hf_data], ignore_index=True)
     full_data.attrs["wavelength_map"] = wavelength_map
     return full_data
+
+
+def first_existing_file(data_dir, filenames):
+    for filename in filenames:
+        path = data_dir / filename
+        if path.exists():
+            return path
+    raise FileNotFoundError(
+        "Could not find any of: "
+        + ", ".join(str(data_dir / filename) for filename in filenames)
+    )
+
+
+def load_lf_predictors(data_dir, columns):
+    columns = columns.str.strip()
+    path = first_existing_file(data_dir, ["XLF10k.csv", "XLF_10k.csv"])
+    x_lf = pd.read_csv(path, skipinitialspace=True)
+    x_lf.columns = x_lf.columns.str.strip()
+
+    if list(x_lf.columns) == list(columns):
+        return x_lf
+
+    return pd.read_csv(
+        path,
+        header=None,
+        names=columns,
+        skipinitialspace=True,
+    )
 
 
 def create_data_indexes(full_data):
