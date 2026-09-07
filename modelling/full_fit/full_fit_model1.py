@@ -3,7 +3,7 @@
 from pathlib import Path
 import sys
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -20,30 +20,37 @@ output_dir = PROJECT_ROOT / "results/model1/full_fit"
 
 # Model 1
 n_input_cols = 10  # 9 physical/input columns + 1 fidelity indicator
+sample_idx = 81     # choice of held out sample
 
-for i in range(195):  # 195 wavelengths
+hf_rows = full_data.index[full_data["is_hf"] == 1]
+held_out_row = hf_rows[sample_idx]
+
+sample_data = full_data.loc[[held_out_row]].copy()
+training_data = full_data.drop(index=held_out_row).copy()
+
+
+for i in range(195):
     considered_wavelength = wavelength_map[i]
 
-    # Pick the i-th response column as the scalar target y
-    response_col = full_data.columns[n_input_cols + i]
+    column_indices = list(range(n_input_cols)) + [n_input_cols + i]
+    train_data = training_data.iloc[:, column_indices].copy()
+    test_data = sample_data.iloc[:, column_indices].copy()
 
-    # Keep inputs + fidelity indicator + only this one response column
-    train_data = full_data.iloc[:, list(range(n_input_cols)) + [n_input_cols + i]].copy()
-
-    # Train model on train_data HF-only
+    # Single-fidelity model: train without HF sample 81.
     fit_model1(train_data, HF_only=True)
-    predict_model1(train_data, HF_only=True)
+    predict_model1(test_data, HF_only=True)
     save_model1(output_dir / f"model1_sf_response_{i}.pkl")
 
-    # Train model on train_data MF (LF + HF)
+    # Multi-fidelity model: train without HF sample 81.
     fit_model1(train_data, HF_only=False)
-    predict_model1(train_data, HF_only=False)
+    predict_model1(test_data, HF_only=False)
     save_model1(output_dir / f"model1_mf_response_{i}.pkl")
 
-    print(f"Finished response_{i}, wavelength={considered_wavelength} nm")
+    print(
+        f"Finished response_{i}, "
+        f"wavelength={considered_wavelength} nm"
+    )
 
-
-sample_idx = 81
 model_kind = "mf"  # use "sf" for HF-only models, "mf" for multi-fidelity models
 
 sample_data = full_data.iloc[[sample_idx]].copy()

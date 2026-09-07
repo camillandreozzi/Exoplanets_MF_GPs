@@ -619,16 +619,29 @@ def main():
 def run_lanes(tasks):
     stage_start = perf_counter()
     lane_seconds = []
+    # One lane raising must not lose the run: a lane is a self-contained unit
+    # that writes its own file, and every other lane in the pool represents
+    # hours of work. Failed lanes leave no file behind, so a rerun retries them.
+    failed_tasks = []
 
     with ProcessPoolExecutor(max_workers=CV_CPU, initializer=init_worker) as executor:
         future_to_task = {executor.submit(run_lane_task, task): task for task in tasks}
 
         for completed, future in enumerate(as_completed(future_to_task), start=1):
             task = future_to_task[future]
-            result = future.result()
-            lane_seconds.append(result["elapsed"])
-
             model_name, key = task
+
+            try:
+                result = future.result()
+            except Exception as error:
+                failed_tasks.append(task)
+                log(
+                    f"FAILED {model_name} lane {key:03d} "
+                    f"({completed}/{len(tasks)}); {type(error).__name__}: {error}"
+                )
+                continue
+
+            lane_seconds.append(result["elapsed"])
             log(
                 f"Completed {model_name} lane {key:03d} "
                 f"({completed}/{len(tasks)}); rows={result['rows']}; "
@@ -637,11 +650,20 @@ def run_lanes(tasks):
             )
 
     log(f"Finished all lanes in {duration_text(perf_counter() - stage_start)}")
+    if failed_tasks:
+        log(
+            f"WARNING: {len(failed_tasks)} lane(s) failed and wrote no file: "
+            + ", ".join(f"{model_name} {key:03d}" for model_name, key in failed_tasks)
+            + ". Rerunning the script retries exactly these."
+        )
 
 
 def eta_text(lane_seconds, remaining):
     if remaining == 0:
         return "0s"
+
+    if not lane_seconds:
+        return "unknown"
 
     mean_lane_seconds = float(np.mean(lane_seconds))
     return duration_text(mean_lane_seconds * remaining / CV_CPU)

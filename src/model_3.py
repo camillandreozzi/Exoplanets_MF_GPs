@@ -208,7 +208,11 @@ def tune_model3_parameters(
 
     method = method.lower()
     tuning_params = _tuning_base_params(params)
-    tuning_gp_model = _make_tuning_gp_model(arrays, gp_kwargs=gp_kwargs)
+    tuning_gp_model = _make_tuning_gp_model(
+        arrays,
+        gp_kwargs=gp_kwargs,
+        train_gp_model_cov_pars=train_gp_model_cov_pars,
+    )
 
     if method == "tpe":
         opt_params = gpb.tune_pars_TPE_algorithm_optuna(
@@ -354,15 +358,30 @@ def fit_model3(
         data=arrays["x_gp_offset"],
         num_iteration=None,
     )
+    _validate_fixed_effect(
+        fixed_effect_gp_train,
+        arrays["y_gp"],
+        fit_params,
+        num_boost_round,
+    )
     gp_model = make_model3_gp_model(
         arrays["coords_gp"],
         HF_only=HF_only,
         gp_kwargs=gp_kwargs,
     )
+    init_cov_pars = _initial_cov_pars_for_gp_model(
+        gp_model=gp_model,
+        y=arrays["y_gp"],
+        coords=arrays["coords_gp"],
+        offset=fixed_effect_gp_train,
+    )
     gp_model.fit(
         y=arrays["y_gp"],
         offset=fixed_effect_gp_train,
-        params=_gp_fit_params(train_gp_model_cov_pars),
+        params=_gp_fit_params(
+            train_gp_model_cov_pars,
+            init_cov_pars=init_cov_pars,
+        ),
     )
 
     model = Model3Fit(
@@ -534,7 +553,7 @@ def make_model3_gp_model(gp_coords, HF_only=False, gp_kwargs=None):
     return gpb.GPModel(**kwargs)
 
 
-def _make_tuning_gp_model(arrays, gp_kwargs=None):
+def _make_tuning_gp_model(arrays, gp_kwargs=None, train_gp_model_cov_pars=True):
     """The GP the tuner validates against.
 
     Without a ``gp_model`` the tuner scores tree-only CV error, so it selects a
@@ -547,20 +566,41 @@ def _make_tuning_gp_model(arrays, gp_kwargs=None):
     this is the single-fidelity Matern GP on those rows either way; it is a
     proxy for the AR(1) GP that the multi-fidelity fit ultimately uses.
     """
-    return make_model3_gp_model(
+    gp_model = make_model3_gp_model(
         arrays["x_tree"],
         HF_only=True,
         gp_kwargs=gp_kwargs,
     )
+    init_cov_pars = _initial_cov_pars_for_gp_model(
+        gp_model=gp_model,
+        y=arrays["y_tree"],
+        coords=arrays["x_tree"],
+    )
+    gp_model.set_optim_params(
+        params=_gp_fit_params(
+            train_gp_model_cov_pars,
+            init_cov_pars=init_cov_pars,
+        )
+    )
+    return gp_model
 
 
 def default_model3_search_space(n_train):
-    """Default Optuna/TPE ranges from the GPBoost template, bounded by data size."""
+    """Default Optuna/TPE ranges from the GPBoost template, bounded by data size.
+
+    ``learning_rate`` is capped at 1 rather than the template's 10. The tuner
+    scores each trial with the GP in the loop, where a rate above 1 only makes
+    the boosting converge badly (huge but finite CV error), so such a trial can
+    still win a fold. The final fit trains the tree on its own, where L2
+    boosting is only contractive for a rate below 2: at 3.2 the fixed effect
+    reaches ~1e154 after 1000 rounds, and the GP fit then dies with "NaN
+    occurred in initial negative log-likelihood".
+    """
     max_bin = max(63, min(10000, int(n_train)))
     min_data_in_leaf_upper = max(1, min(1000, int(n_train)))
 
     return {
-        "learning_rate": [0.001, 10],
+        "learning_rate": [0.001, 1],
         "min_data_in_leaf": [1, min_data_in_leaf_upper],
         "max_depth": [-1, -1],
         "num_leaves": [2, 1024],
@@ -578,7 +618,8 @@ def default_model3_param_grid(n_train):
     )
 
     return {
-        "learning_rate": [0.001, 0.01, 0.1, 1, 10],
+        # 10 is dropped for the reason given in default_model3_search_space.
+        "learning_rate": [0.001, 0.01, 0.1, 1],
         "min_data_in_leaf": _unique_preserving_order(
             [1, 10, 100, min(1000, int(n_train))]
         ),
@@ -679,11 +720,134 @@ def _fit_params(params, tuning_result):
     return fit_params
 
 
-def _gp_fit_params(train_gp_model_cov_pars):
+def _validate_fixed_effect(fixed_effect, y, fit_params, num_boost_round):
+    """Fail on a diverged boosted mean before the GP sees it.
+
+    A learning rate at or above 2 makes L2 boosting expand rather than shrink
+    the residual, so the fixed effect grows geometrically with the number of
+    rounds. The values stay finite for a long while (~1e154 at learning_rate
+    3.2 over 1000 rounds) but squaring them inside the likelihood overflows,
+    and GPBoost then reports only "NaN occurred in initial negative
+    log-likelihood" from inside the GP fit, with no hint of where it came from.
+    """
+    # Generous: a sane fixed effect sits within the response range, and the
+    # diverged one is many orders of magnitude past this bound.
+    scale_limit = 1e3 * max(float(np.max(np.abs(y))), np.finfo(float).tiny)
+    largest = float(np.max(np.abs(fixed_effect))) if len(fixed_effect) else 0.0
+
+    if np.all(np.isfinite(fixed_effect)) and largest <= scale_limit:
+        return
+
+    raise ValueError(
+        "Model 3 boosted fixed effect diverged: largest absolute value "
+        f"{largest:.3e} against a response scale of {float(np.max(np.abs(y))):.3e}, "
+        f"after {num_boost_round} boosting rounds with "
+        f"learning_rate={fit_params.get('learning_rate')}, "
+        f"num_leaves={fit_params.get('num_leaves')}, "
+        f"min_data_in_leaf={fit_params.get('min_data_in_leaf')}. "
+        "Lower the learning_rate bound in the tuning search space."
+    )
+
+
+def _gp_fit_params(train_gp_model_cov_pars, init_cov_pars=None):
     fit_params = {"trace": False}
+    if init_cov_pars is not None:
+        fit_params["init_cov_pars"] = np.asarray(init_cov_pars, dtype=np.float64)
     if not train_gp_model_cov_pars:
         fit_params["maxit"] = 0
     return fit_params
+
+
+def _initial_cov_pars_for_gp_model(gp_model, y, coords, offset=None):
+    """Choose finite positive GP covariance starting values from the data scale."""
+    cov_par_names = getattr(gp_model, "cov_par_names", None)
+    if not cov_par_names:
+        return None
+
+    variance = _variance_scale(y, offset=offset)
+    range_scale = _coordinate_range_scale(coords)
+
+    gp_var_names = [
+        name
+        for name in cov_par_names
+        if "var" in name.lower() and name.lower() != "error_var"
+    ]
+    gp_var = max(0.9 * variance / max(len(gp_var_names), 1), np.finfo(float).tiny)
+    error_var = max(0.1 * variance, np.finfo(float).tiny)
+
+    init_cov_pars = []
+    for name in cov_par_names:
+        lower_name = name.lower()
+        if lower_name == "error_var":
+            init_cov_pars.append(error_var)
+        elif "range" in lower_name:
+            init_cov_pars.append(range_scale)
+        elif lower_name == "rho":
+            init_cov_pars.append(1.0)
+        elif "var" in lower_name:
+            init_cov_pars.append(gp_var)
+        else:
+            init_cov_pars.append(variance)
+
+    return np.asarray(init_cov_pars, dtype=np.float64)
+
+
+def _variance_scale(y, offset=None):
+    values = np.asarray(y, dtype=float).reshape(-1)
+    if offset is not None:
+        values = values - np.asarray(offset, dtype=float).reshape(-1)
+
+    finite_values = values[np.isfinite(values)]
+    if len(finite_values) == 0:
+        return 1.0
+
+    variance = float(np.var(finite_values))
+    magnitude = max(
+        float(np.nanmedian(np.abs(finite_values))),
+        float(np.nanstd(finite_values)),
+        1.0,
+    )
+    min_variance = max(np.finfo(float).eps * magnitude * magnitude, np.finfo(float).tiny)
+    if not np.isfinite(variance) or variance <= 0:
+        variance = min_variance
+    return max(variance, min_variance)
+
+
+def _coordinate_range_scale(coords):
+    coords = np.asarray(coords, dtype=float)
+    if coords.ndim != 2 or coords.shape[0] < 2:
+        return 1.0
+
+    range_coords = coords
+    if coords.shape[1] > 1:
+        last_col = coords[:, -1]
+        finite_last = last_col[np.isfinite(last_col)]
+        unique_last = np.unique(finite_last)
+        if len(unique_last) <= 2 and np.all(np.isin(unique_last, [0.0, 1.0])):
+            range_coords = coords[:, :-1]
+
+    finite_rows = range_coords[np.all(np.isfinite(range_coords), axis=1)]
+    if len(finite_rows) < 2:
+        return 1.0
+
+    max_rows = min(512, len(finite_rows))
+    if len(finite_rows) > max_rows:
+        rng = np.random.default_rng(0)
+        finite_rows = finite_rows[
+            rng.choice(len(finite_rows), size=max_rows, replace=False)
+        ]
+
+    diffs = finite_rows[:, np.newaxis, :] - finite_rows[np.newaxis, :, :]
+    distances = np.sqrt(np.sum(diffs * diffs, axis=2))
+    upper = distances[np.triu_indices(len(finite_rows), k=1)]
+    positive = upper[np.isfinite(upper) & (upper > 0)]
+    if len(positive) == 0:
+        return 1.0
+
+    range_scale = float(np.median(positive))
+    if not np.isfinite(range_scale) or range_scale <= 0:
+        return 1.0
+    return max(range_scale, np.finfo(float).eps)
 
 
 def _split_model3_predict_kwargs(predict_kwargs):
