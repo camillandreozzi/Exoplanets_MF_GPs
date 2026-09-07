@@ -20,16 +20,18 @@ def prepare_model2_data(
         Number of LF atmospheric samples to retain. Use None to retain all
         LF samples.
     n_wavelengths
-        Number of wavelengths to use, distributed approximately evenly over
-        the full wavelength range. Use None to retain all wavelengths.
+        Number of wavelengths to sample independently for each spectrum.
+        Sampling is without replacement. Use None to retain all wavelengths.
     wavelength_indices
-        Explicit wavelength indices to use. This takes precedence over
-        n_wavelengths.
+        Explicit wavelength indices to use for every spectrum. This takes
+        precedence over n_wavelengths and is useful for validation/prediction
+        on a common wavelength grid.
     random_state
-        Seed used when sampling LF atmospheric samples.
+        Seed used when sampling LF atmospheric samples and wavelengths.
     """
     wavelength_map = full_data.attrs["wavelength_map"]
     attrs = full_data.attrs.copy()
+    retained_row_indices = full_data.index.tolist()
 
     # ---------------------------------------------------------------
     # Select LF atmospheric samples.
@@ -54,6 +56,7 @@ def prepare_model2_data(
         )
 
         selected_rows = lf_sample.index.union(hf_data.index).sort_values()
+        retained_row_indices = selected_rows.tolist()
 
         full_data = (
             full_data.loc[selected_rows]
@@ -68,6 +71,10 @@ def prepare_model2_data(
     all_wavelength_indices = np.array(
         sorted(wavelength_map.keys()),
         dtype=int,
+    )
+
+    sample_wavelengths_per_spectrum = (
+        wavelength_indices is None and n_wavelengths is not None
     )
 
     if wavelength_indices is not None:
@@ -103,14 +110,9 @@ def prepare_model2_data(
                 f"{len(all_wavelength_indices)}."
             )
 
-        # Spread the selected wavelengths over the complete spectrum.
-        positions = np.linspace(
-            0,
-            len(all_wavelength_indices) - 1,
-            n_wavelengths,
-            dtype=int,
-        )
-        selected_wavelength_indices = all_wavelength_indices[positions]
+        # All wavelengths are candidates; each spectrum gets its own subset
+        # after the data have been converted to long format.
+        selected_wavelength_indices = all_wavelength_indices
 
     response_items = [
         (i, wavelength_map[i])
@@ -174,6 +176,34 @@ def prepare_model2_data(
         .map(wavelength_by_response)
     )
 
+    wavelength_indices_by_row = None
+    if sample_wavelengths_per_spectrum:
+        rng = np.random.default_rng(random_state)
+        wavelength_indices_by_row = {
+            row_id: np.sort(
+                rng.choice(
+                    all_wavelength_indices,
+                    size=n_wavelengths,
+                    replace=False,
+                )
+            ).tolist()
+            for row_id in working["_row_id"]
+        }
+
+        keep_pairs = {
+            (row_id, response_index)
+            for row_id, response_indices in wavelength_indices_by_row.items()
+            for response_index in response_indices
+        }
+        keep_mask = [
+            (row_id, response_index) in keep_pairs
+            for row_id, response_index in zip(
+                long_data["_row_id"],
+                long_data["response_index"],
+            )
+        ]
+        long_data = long_data.loc[keep_mask]
+
     long_data = (
         long_data
         .sort_values(["_row_id", "response_index"])
@@ -190,7 +220,11 @@ def prepare_model2_data(
     )
     long_data.attrs["LF_number"] = LF_number
     long_data.attrs["wavelength_indices"] = (
-        selected_wavelength_indices.tolist()
+        None
+        if sample_wavelengths_per_spectrum
+        else selected_wavelength_indices.tolist()
     )
+    long_data.attrs["wavelength_indices_by_row"] = wavelength_indices_by_row
+    long_data.attrs["source_dataframe_indices_by_row"] = retained_row_indices
 
     return long_data

@@ -4,14 +4,14 @@ import pandas as pd
 from pathlib import Path
 import sys
 
-from src.data_load import load_full_data
-from src.model_2 import prepare_model2_data
-from src.model_1 import fit_model1, predict_model1, save_model1
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+from src.data_load import load_full_data
+from src.model_2 import prepare_model2_data
+from src.model_1 import fit_model1, predict_model1, save_model1
 
 
 HELD_OUT_HF_SAMPLE = 81
@@ -38,11 +38,11 @@ train_long = prepare_model2_data(
     n_wavelengths=N_WAVELENGTHS,
     random_state=RANDOM_STATE,
 )
-selected_wavelength_indices = train_long.attrs["wavelength_indices"]
 held_out_long = prepare_model2_data(
     held_out_wide,
     LF_number=None,
-    wavelength_indices=selected_wavelength_indices,
+    # Evaluate the held-out spectrum on the complete common wavelength grid.
+    wavelength_indices=sorted(full_data.attrs["wavelength_map"]),
 )
 
 
@@ -92,5 +92,6 @@ np.save(
 print(f"Held out HF sample: {HELD_OUT_HF_SAMPLE}")
 print(f"Original full_data row: {held_out_row}")
 print(f"LF samples used: {LF_SAMPLES}")
-print(f"Wavelengths used: {len(selected_wavelength_indices)}")
+print(f"Wavelengths sampled per training spectrum: {N_WAVELENGTHS}")
+print(f"Held-out wavelengths predicted: {len(held_out_long)}")
 print(f"Results saved in: {output_dir}")

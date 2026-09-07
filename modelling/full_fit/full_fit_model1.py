@@ -28,8 +28,11 @@ held_out_row = hf_rows[sample_idx]
 sample_data = full_data.loc[[held_out_row]].copy()
 training_data = full_data.drop(index=held_out_row).copy()
 
+# Responses 0--117 have already been fitted. Restart at 118; saving it again
+# also replaces the truncated MF file left by the disk-full failure.
+start_response = 118
 
-for i in range(195):
+for i in range(start_response, 195):
     considered_wavelength = wavelength_map[i]
 
     column_indices = list(range(n_input_cols)) + [n_input_cols + i]
