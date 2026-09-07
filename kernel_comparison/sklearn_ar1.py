@@ -22,21 +22,6 @@ This module provides
 
 * :class:`AR1Params` / :class:`AR1Fit`, the parameter and result records shared
   with ``kernel_comparison/gpboost_ar1.py``.
-
-Parametrisation
----------------
-Matching ``ar1_mf_matern`` means a single shared length scale (not ARD), and
-scikit-learn's ``Matern`` uses the same convention as GPBoost's Matern range:
-
-    ell (scikit-learn length_scale) == GPBoost GP_range
-
-verified against ``GPModel.neg_log_likelihood`` to ~1e-14, so
-:meth:`AR1Params.to_gpboost` is a plain reordering with no rescaling.  (Note
-this is specific to the Matern family: GPBoost's *Gaussian* covariance uses the
-Diggle-Ribeiro form and would need a sqrt(2) factor.)
-
-To switch to per-input length scales instead, set ``ar1_mf_matern_ard`` in
-``gpboost_ar1.py`` and pass a length-scale vector to ``Matern`` here.
 """
 
 import time

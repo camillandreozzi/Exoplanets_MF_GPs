@@ -44,7 +44,7 @@ import json
 import os
 
 DATA_DIR = PROJECT_ROOT / "data"
-RESULTS_DIR = PROJECT_ROOT / "results" / "kernel"
+RESULTS_DIR = PROJECT_ROOT / "kernel_comparison" / "results"
 COMPARISON_DIR = RESULTS_DIR / "comparison"
 os.environ.setdefault("MPLCONFIGDIR", str(RESULTS_DIR / ".matplotlib"))
 

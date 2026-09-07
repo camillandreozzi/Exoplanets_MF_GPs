@@ -41,7 +41,7 @@ from kernel_comparison.sklearn_ar1 import (
 
 
 COV_FUNCTION = "ar1_mf_matern"  # GPBoost built-in; cov_fct_shape below is its nu
-NUM_NEIGHBORS = 20              # only used when gp_approx="vecchia"
+NUM_NEIGHBORS = 40              # only used when gp_approx="vecchia"
 GP_THREADS = 1                  # comparable timings with the single-threaded sklearn arm
 
 # GPBoost's default convergence tolerance (1e-6) is looser than the default of
@@ -140,8 +140,7 @@ def _gp_model(X, fidelity, gp_approx, num_neighbors):
     """The built-in AR(1) multi-fidelity GPModel; fidelity goes in the last column.
 
     No ``X`` (covariate) matrix is ever passed to ``fit``, so the model is
-    zero-mean, exactly like the scikit-learn arm with ``normalize_y=False``;
-    both scripts centre the responses themselves.
+    zero-mean.
     """
     if not np.all(np.isin(fidelity, (0.0, 1.0))):
         raise ValueError("fidelity must contain only 0 (low) and 1 (high).")

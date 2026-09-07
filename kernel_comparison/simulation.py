@@ -16,12 +16,6 @@ Why three arms
     gpboost_exact    exact likelihood, GPBoost L-BFGS
     gpboost_vecchia  Vecchia-approximated likelihood, GPBoost L-BFGS
 
-sklearn vs gpboost_exact isolates the *optimiser*: both minimise literally the
-same function (asserted at run time), so any gap is optimisation quality.
-gpboost_vecchia vs gpboost_exact isolates the *approximation*: same optimiser,
-different surface.  Every arm is finally scored on the exact likelihood and
-through one shared exact predictor, so the columns are comparable throughout.
-
 Outputs
 -------
 results/kernel/<framework>/simulation_fits.csv   per-replicate fits, per arm
@@ -39,7 +33,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import json
 import os
 
-RESULTS_DIR = PROJECT_ROOT / "results" / "kernel"
+RESULTS_DIR = PROJECT_ROOT / "kernel_comparison" / "results"
 COMPARISON_DIR = RESULTS_DIR / "comparison"
 os.environ.setdefault("MPLCONFIGDIR", str(RESULTS_DIR / ".matplotlib"))
 
