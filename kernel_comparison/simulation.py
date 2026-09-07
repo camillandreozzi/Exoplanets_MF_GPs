@@ -33,7 +33,7 @@ if str(PROJECT_ROOT) not in sys.path:
 import json
 import os
 
-RESULTS_DIR = PROJECT_ROOT / "kernel_comparison" / "results"
+RESULTS_DIR = PROJECT_ROOT / "kernel_comparison" / "results_kernel"
 COMPARISON_DIR = RESULTS_DIR / "comparison"
 os.environ.setdefault("MPLCONFIGDIR", str(RESULTS_DIR / ".matplotlib"))
 
