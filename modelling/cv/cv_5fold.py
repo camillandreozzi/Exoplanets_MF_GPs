@@ -398,7 +398,12 @@ def validate_model1_wavelength_data(data, response_col):
         )
 
 
-def run_model2_fold(split, response_indexes=None):
+def run_model2_fold(
+    split,
+    response_indexes=None,
+    train_n_wavelengths=None,
+    train_wavelength_random_state=None,
+):
     """Fit one augmented GP over atmospheric inputs plus wavelength."""
     fold_start = perf_counter()
     response_count = len(selected_response_indexes(response_indexes))
@@ -407,7 +412,12 @@ def run_model2_fold(split, response_indexes=None):
         f"for {response_count} response indexes"
     )
     prep_start = perf_counter()
-    train_long = prepare_model2_fold_data(split["train_data"], response_indexes)
+    train_long = prepare_model2_fold_data(
+        split["train_data"],
+        response_indexes,
+        n_wavelengths=train_n_wavelengths,
+        random_state=train_wavelength_random_state,
+    )
     validation_long = prepare_model2_fold_data(
         split["validation_data"],
         response_indexes,
@@ -582,8 +592,23 @@ def repeated_validation_source_indices(validation_data, response_indexes=None):
     return np.repeat(validation_data["source_index"].to_numpy(), n_responses)
 
 
-def prepare_model2_fold_data(data, response_indexes=None):
-    long_data = prepare_model2_data(data, LF_number=None)
+def prepare_model2_fold_data(
+    data,
+    response_indexes=None,
+    n_wavelengths=None,
+    random_state=None,
+):
+    if n_wavelengths is not None and response_indexes is not None:
+        raise ValueError(
+            "n_wavelengths and response_indexes cannot both be set for Model 2."
+        )
+
+    long_data = prepare_model2_data(
+        data,
+        LF_number=None,
+        n_wavelengths=n_wavelengths,
+        random_state=random_state,
+    )
 
     if response_indexes is None:
         validate_model2_augmented_data(long_data)

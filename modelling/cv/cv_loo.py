@@ -81,8 +81,8 @@ CV_CPU = 8
 
 # Toggle which models and variants are run.
 RUN_MODEL1 = False
-RUN_MODEL2 = False
-RUN_MODEL3 = True
+RUN_MODEL2 = True
+RUN_MODEL3 = False
 RUN_SF = True
 RUN_MF = True
 
@@ -104,8 +104,12 @@ FRESH_RUN = False
 # for equivalence checks against a previous run.
 MAX_FOLDS = None
 
-LF_SAMPLE_SIZE = 10000
+LF_SAMPLE_SIZE = 1000
 LF_SAMPLE_RANDOM_STATE = 42
+# Sample a separate set of wavelengths within every Model 2 training spectrum.
+# Held-out HF spectra are still predicted at all 195 wavelengths.
+MODEL2_N_WAVELENGTHS = 50
+MODEL2_WAVELENGTH_RANDOM_STATE = 42
 RESULTS_DIR = PROJECT_ROOT / "results" / "cv" / "loo"
 CV_LABEL = "loo"
 LANE_RESULTS_DIR = RESULTS_DIR / "lanes"
@@ -405,7 +409,12 @@ def run_model2_lane(fold):
     # No parameter rows: run_model2_fold is shared with the 5-fold script and
     # does not hand back the fitted GP, so capturing its covariance parameters
     # would mean changing that shared helper.
-    return cv_helpers.run_model2_fold(split, MODEL2_RESPONSE_INDEXES), []
+    return cv_helpers.run_model2_fold(
+        split,
+        MODEL2_RESPONSE_INDEXES,
+        train_n_wavelengths=MODEL2_N_WAVELENGTHS,
+        train_wavelength_random_state=MODEL2_WAVELENGTH_RANDOM_STATE,
+    ), []
 
 
 def cov_par_values(cov_pars):
@@ -780,6 +789,18 @@ def validate_run_selection():
         raise ValueError("At least one of RUN_SF or RUN_MF must be True.")
     if CV_CPU < 1:
         raise ValueError("CV_CPU must be at least 1.")
+    if RUN_MODEL2 and MODEL2_N_WAVELENGTHS is not None:
+        if not isinstance(MODEL2_N_WAVELENGTHS, (int, np.integer)):
+            raise ValueError("MODEL2_N_WAVELENGTHS must be an integer or None.")
+        if not 1 <= MODEL2_N_WAVELENGTHS <= RESPONSE_DIM:
+            raise ValueError(
+                f"MODEL2_N_WAVELENGTHS must be between 1 and {RESPONSE_DIM}."
+            )
+        if MODEL2_RESPONSE_INDEXES is not None:
+            raise ValueError(
+                "MODEL2_N_WAVELENGTHS samples within each spectrum and cannot "
+                "be combined with a common MODEL2_RESPONSE_INDEXES subset."
+            )
 
 
 def active_variants():
@@ -823,6 +844,7 @@ def log_run_setup(full_data, cv_data):
         f"model1_response_indexes={model1_response_count}, "
         f"model2_response_indexes={model2_response_count}, "
         f"model3_response_indexes={model3_response_count}, "
+        f"model2_n_wavelengths_per_training_spectrum={MODEL2_N_WAVELENGTHS}, "
         f"cv_cpu={CV_CPU}, warm_start_model1_mf={WARM_START_MODEL1_MF}, "
         f"fresh_run={FRESH_RUN}, max_folds={MAX_FOLDS}"
     )
@@ -861,6 +883,8 @@ def save_run_config(full_data, cv_data):
         "max_folds": MAX_FOLDS,
         "lf_sample_size": LF_SAMPLE_SIZE,
         "lf_sample_random_state": LF_SAMPLE_RANDOM_STATE,
+        "model2_n_wavelengths_per_training_spectrum": MODEL2_N_WAVELENGTHS,
+        "model2_wavelength_random_state": MODEL2_WAVELENGTH_RANDOM_STATE,
         "n_lf_available": int(full_data["is_hf"].eq(0).sum()),
         "n_hf_available": int(full_data["is_hf"].eq(1).sum()),
         "n_lf_used": int(len(lf_sample)),
