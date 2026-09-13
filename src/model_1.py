@@ -11,97 +11,131 @@ _model1 = None
 _model1_HF_only = None
 _model1_metadata = {}
 _model1_last_prediction = None
+_model1_input_mean = None
+_model1_input_std = None
 GP_THREADS = 1
 
+def _fit_input_scaler(x, fidelity):
+    x_hf = x[fidelity == 1]
+    if len(x_hf) == 0:
+        raise ValueError("Model 1 requires HF training rows for input scaling.")
+
+    mean = x_hf.mean(axis=0)
+    std = x_hf.std(axis=0, ddof=0)
+    std = np.where(std == 0, 1.0, std)
+    return mean, std
+
+
+def _scaled_gp_coords(x, fidelity, mean, std, HF_only):
+    scaled = (x - mean) / std
+    if HF_only:
+        return scaled
+    return np.column_stack([scaled, fidelity])
 
 # the matrix that passes as training data must have 11 columns
 # 9 atmospheric parameters, 1 column for the fidelity indicator, and 1 column for the response variable (scalar)
-def fit_model1(train_data, HF_only= False, init_cov_pars=None):
-    """Fit the Model 1 GP.
+def fit_model1(train_data, HF_only=False, init_cov_pars=None):
+    global _model1, _model1_HF_only
+    global _model1_metadata, _model1_last_prediction
+    global _model1_input_mean, _model1_input_std
 
-    ``init_cov_pars`` seeds the covariance-parameter optimiser, e.g. with the
-    values fitted on a neighbouring leave-one-out fold. It only changes where
-    the optimiser starts, not the data it is fit to; see ``model1_cov_pars``.
-    """
-    global _model1, _model1_HF_only, _model1_metadata, _model1_last_prediction
+    x = train_data.iloc[:, :-2].to_numpy(dtype=float)
+    fidelity = train_data.iloc[:, -2].to_numpy()
+    y = train_data.iloc[:, -1].to_numpy(dtype=float)
 
-    # Input coordinates only: exclude fidelity indicator and response column
-    x_train = train_data.iloc[:, :-2].values
-
-    # Fidelity indicator only: second-to-last column
-    fidelity = train_data.iloc[:, -2].values
-
-    # Response/output: last column
-    y_train = train_data.iloc[:, -1].values
-
-    # Multi-fidelity coordinates: inputs + fidelity indicator
-    coords_train_mf = train_data.iloc[:, :-1].values  # 9 inputs + fidelity
+    # Learn scaling from this fit's training HF rows only.
+    mean, std = _fit_input_scaler(x, fidelity)
 
     if HF_only:
-        # Subset x_train and y_train to only include high-fidelity samples
-        hf_indices = np.where(fidelity == 1)[0]
-        x_train = x_train[hf_indices]
-        y_train = y_train[hf_indices]
+        keep = fidelity == 1
+        x = x[keep]
+        fidelity = fidelity[keep]
+        y = y[keep]
 
-        # Gaussian Process for high-fidelity data only
-        gp_model = gpb.GPModel(gp_coords= x_train, cov_function = "matern", 
-                       cov_fct_shape= 1.5, gp_approx = "vecchia", num_neighbors=20, 
-                       likelihood="gaussian",
-                       num_parallel_threads=GP_THREADS)
+    coords = _scaled_gp_coords(
+        x, fidelity, mean, std, HF_only=HF_only
+    )
 
+    gp_model = gpb.GPModel(
+        gp_coords=coords,
+        cov_function="matern" if HF_only else "ar1_mf_matern",
+        cov_fct_shape=1.5,
+        gp_approx="vecchia",
+        num_neighbors=20,
+        likelihood="gaussian",
+        num_parallel_threads=GP_THREADS,
+    )
 
-    else:
-        # MF AR(1) model for both high-fidelity and low-fidelity data
-        gp_model = gpb.GPModel(gp_coords= coords_train_mf, cov_function = "ar1_mf_matern", 
-                       cov_fct_shape= 1.5, gp_approx = "vecchia", num_neighbors=20, 
-                       likelihood="gaussian",
-                       num_parallel_threads=GP_THREADS)
-        
-    gp_model.fit(y=y_train, X=x_train, params=_gp_fit_params(init_cov_pars))
+    # Preserve the raw-input linear mean.
+    gp_model.fit(
+        y=y,
+        X=x,
+        params=_gp_fit_params(init_cov_pars),
+    )
+
     _model1 = gp_model
     _model1_HF_only = HF_only
+    _model1_input_mean = mean
+    _model1_input_std = std
     _model1_metadata = _get_model1_metadata(train_data, HF_only)
+    _model1_metadata["input_scaling"] = {
+        "method": "standard",
+        "fitted_on": "training_hf",
+        "applied_to": "gp_coordinates_only",
+        "columns": list(train_data.columns[:-2]),
+        "mean": mean.tolist(),
+        "std": std.tolist(),
+    }
     _model1_last_prediction = None
-    return gp_model
-   
 
-def predict_model1(validation_data, HF_only= False, compute_metrics=True):
+    return gp_model
+
+def predict_model1(
+    validation_data,
+    HF_only=False,
+    compute_metrics=True,
+):
     global _model1_last_prediction
 
     if _model1 is None:
-        raise RuntimeError("fit_model1 must be called before predict_model1.")
+        raise RuntimeError(
+            "fit_model1 must be called before predict_model1."
+        )
 
     if HF_only != _model1_HF_only:
         raise ValueError(
-            "predict_model1 was called with a different HF_only value than fit_model1."
+            "predict_model1 was called with a different HF_only "
+            "value than fit_model1."
         )
 
-    # Input coordinates only: exclude fidelity indicator and response column
-    x_validation = validation_data.iloc[:, :-2].values
+    x = validation_data.iloc[:, :-2].to_numpy(dtype=float)
+    fidelity = validation_data.iloc[:, -2].to_numpy()
 
-    # Multi-fidelity coordinates: inputs + fidelity indicator
-    coords_validation_mf = validation_data.iloc[:, :-1].values
-
-    if HF_only:
-        gp_coords_pred = x_validation
-    else:
-        gp_coords_pred = coords_validation_mf
+    # Reuse training statistics; never fit a scaler on validation data.
+    coords = _scaled_gp_coords(
+        x,
+        fidelity,
+        _model1_input_mean,
+        _model1_input_std,
+        HF_only=HF_only,
+    )
 
     prediction = _model1.predict(
-        gp_coords_pred=gp_coords_pred,
-        X_pred=x_validation,
+        gp_coords_pred=coords,
+        X_pred=x,
         predict_response=True,
         predict_var=True,
     )
 
     metrics = None
     if compute_metrics:
-        y_true = validation_data.iloc[:, -1].values
+        y_true = validation_data.iloc[:, -1].to_numpy(dtype=float)
         metrics = _prediction_metrics(y_true, prediction["mu"])
 
     _model1_last_prediction = {
         "metrics": metrics,
         "n_validation": len(validation_data),
+        "predict_var": True,
     }
 
     return prediction

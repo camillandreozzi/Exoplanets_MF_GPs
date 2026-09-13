@@ -5,16 +5,16 @@ keeps wavelength. This one is the transpose: it collapses wavelength and keeps
 the held-out sample, so each point is one LOO fold scored over its whole
 spectrum.
 
-Metric definitions, chosen to stay on the same scale as the per-wavelength
-figure:
+Metric definitions, matching the normalisation used by the earlier
+model1_loo_sf_vs_mf_nrmse_per_sample.csv:
 
-    NRMSE_s = sqrt( mean_w [ residual_sw / range_w ]^2 )
+    NRMSE_s = sqrt( mean_w residual_sw^2 ) / range_s
     MAE_s   = mean_w | residual_sw |
 
-where range_w is the wavelength's y_true range across folds - the same
-normaliser the per-wavelength NRMSE uses. (Note this differs from the older
-model1_loo_sf_vs_mf_nrmse_per_sample.csv, which normalises each sample by its
-own spectrum range and so sits at a different level.)
+where range_s is the held-out sample's own y_true range across its spectrum.
+Note this is a different normaliser from the per-wavelength figure, which
+divides by each wavelength's range across folds, so the NRMSE levels here are
+not directly comparable with that figure's.
 
 Each panel is a paired scatter: one point per held-out sample, SF on x and MF
 on y, against the y = x line. Below the line means multi-fidelity won for that
@@ -113,30 +113,32 @@ def read_predictions():
 
 def compute_per_sample(predictions):
     """Collapse wavelength within each (model, variant, held-out sample)."""
-    # One normaliser per wavelength, shared across models and variants so the
-    # panels stay comparable with the per-wavelength figure.
-    ranges = predictions.groupby("wavelength")["y_true"].agg(
-        lambda column: column.max() - column.min()
-    )
-    predictions = predictions.assign(
-        scaled_error=predictions["error"] / predictions["wavelength"].map(ranges)
-    )
-
     grouped = predictions.groupby(
         ["model", "variant", "held_out_source_index", "fold"], as_index=False
     ).agg(
         n_wavelengths=("wavelength", "size"),
-        nrmse=("scaled_error", lambda column: float(np.sqrt(np.mean(column**2)))),
         rmse=("error", lambda column: float(np.sqrt(np.mean(column**2)))),
         mae=("error", lambda column: float(np.mean(np.abs(column)))),
         bias=("error", "mean"),
         max_abs_error=("error", lambda column: float(np.max(np.abs(column)))),
+        y_true_range=("y_true", lambda column: float(column.max() - column.min())),
     )
+
+    # One normaliser per held-out sample: the range of its own spectrum.
+    grouped["nrmse"] = grouped["rmse"] / grouped["y_true_range"]
 
     wide = grouped.pivot_table(
         index=["model", "held_out_source_index", "fold"],
         columns="variant",
-        values=["n_wavelengths", "nrmse", "rmse", "mae", "bias", "max_abs_error"],
+        values=[
+            "n_wavelengths",
+            "nrmse",
+            "rmse",
+            "mae",
+            "bias",
+            "max_abs_error",
+            "y_true_range",
+        ],
     )
     wide.columns = [f"{metric}_{variant}" for metric, variant in wide.columns]
     wide = wide.reset_index()
@@ -189,8 +191,8 @@ def plot_grid(per_sample):
     figure.text(
         0.06,
         0.947,
-        "97 held-out samples · 195 wavelengths each · below the diagonal = "
-        "multi-fidelity better for that sample",
+        "97 held-out samples · 195 wavelengths each · NRMSE normalised by each "
+        "sample's own spectrum range · below the diagonal = MF better",
         ha="left",
         fontsize=10,
         color=INK_SECONDARY,

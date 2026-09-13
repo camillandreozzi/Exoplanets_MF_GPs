@@ -8,6 +8,9 @@ The expected input shape matches ``model_1``:
 For the multi-fidelity variant, low-fidelity samples are used only in the
 AR(1) GP covariance component. The boosted fixed-effect mean is trained on
 high-fidelity rows only.
+
+The final residual GP uses standardized physical coordinates, with scaling
+learned from training HF rows only. Tree inputs and the tuning GP remain raw.
 """
 
 import json
@@ -54,12 +57,16 @@ class Model3Fit:
         HF_only,
         n_tree_train=None,
         n_gp_train=None,
+        gp_input_mean=None,
+        gp_input_std=None,
     ):
         self.booster = booster
         self.gp_model = gp_model
         self.HF_only = HF_only
         self.n_tree_train = n_tree_train
         self.n_gp_train = n_gp_train
+        self.gp_input_mean = gp_input_mean
+        self.gp_input_std = gp_input_std
 
     def predict(
         self,
@@ -85,6 +92,11 @@ class Model3Fit:
 
         if ignore_gp_model:
             return fixed_effect
+
+        if self.gp_input_mean is not None:
+            gp_coords_pred = _scale_gp_coordinates(
+                gp_coords_pred, self.gp_input_mean, self.gp_input_std
+            )
 
         if pred_latent:
             random_effect = self.gp_model.predict(
@@ -137,10 +149,19 @@ class Model3Fit:
         self.booster.save_model(str(filename))
         gp_model_file = filename.with_suffix(filename.suffix + ".gp_model.json")
         self.gp_model.save_model(str(gp_model_file))
+        # Keep preprocessing with the model even when save_model() is called
+        # directly, without the module-level diagnostics writer.
+        scaling_file = filename.with_suffix(filename.suffix + ".input_scaling.json")
+        scaling_file.write_text(json.dumps(_to_jsonable({
+            "HF_only": self.HF_only,
+            "mean": self.gp_input_mean,
+            "std": self.gp_input_std,
+        }), indent=2), encoding="utf-8")
         return {
             "model_file": str(filename),
             "tree_model_file": str(filename),
             "gp_model_file": str(gp_model_file),
+            "input_scaling_file": str(scaling_file),
         }
 
 
@@ -304,6 +325,9 @@ def fit_model3(
     predictions as offsets; for ``HF_only=False`` this GP uses an AR(1)
     multi-fidelity covariance. Pass ``tuning_kwargs`` to override
     ``tune_model3_parameters`` defaults.
+
+    Residual GP coordinates are standardized using the training HF means and
+    standard deviations. Trees and their tuning retain unscaled inputs.
     """
     global _model3, _model3_HF_only, _model3_metadata, _model3_last_prediction
 
@@ -364,15 +388,23 @@ def fit_model3(
         fit_params,
         num_boost_round,
     )
+    # Only the residual GP is standardized. The trees and tuning GP retain
+    # raw inputs. Learn one shared transform from this fit's HF rows only.
+    gp_input_mean = arrays["x_tree"].mean(axis=0)
+    gp_input_std = arrays["x_tree"].std(axis=0, ddof=0)
+    gp_input_std = np.where(gp_input_std == 0, 1.0, gp_input_std)
+    coords_gp = _scale_gp_coordinates(
+        arrays["coords_gp"], gp_input_mean, gp_input_std
+    )
     gp_model = make_model3_gp_model(
-        arrays["coords_gp"],
+        coords_gp,
         HF_only=HF_only,
         gp_kwargs=gp_kwargs,
     )
     init_cov_pars = _initial_cov_pars_for_gp_model(
         gp_model=gp_model,
         y=arrays["y_gp"],
-        coords=arrays["coords_gp"],
+        coords=coords_gp,
         offset=fixed_effect_gp_train,
     )
     gp_model.fit(
@@ -390,6 +422,8 @@ def fit_model3(
         HF_only=HF_only,
         n_tree_train=len(arrays["y_tree"]),
         n_gp_train=len(arrays["y_gp"]),
+        gp_input_mean=gp_input_mean,
+        gp_input_std=gp_input_std,
     )
 
     _model3 = model
@@ -404,6 +438,12 @@ def fit_model3(
         n_gp_train=len(arrays["y_gp"]),
     )
     _model3_last_prediction = None
+    _model3_metadata["input_scaling"] = {
+        "applied_to": "residual_gp_coordinates_only",
+        "fitted_on": "training_hf",
+        "mean": gp_input_mean,
+        "std": gp_input_std,
+    }
     return model
 
 
@@ -500,12 +540,23 @@ def load_model3(filename, HF_only=None):
     filename = Path(filename)
     booster = gpb.Booster(model_file=str(filename))
     gp_model_file = filename.with_suffix(filename.suffix + ".gp_model.json")
+    scaling_file = filename.with_suffix(filename.suffix + ".input_scaling.json")
+    scaling = json.loads(scaling_file.read_text(encoding="utf-8")) if scaling_file.exists() else {}
+    saved_hf_only = scaling.get("HF_only")
+    if HF_only is None:
+        HF_only = saved_hf_only
+    elif saved_hf_only is not None and HF_only != saved_hf_only:
+        raise ValueError("HF_only does not match the saved Model 3 fidelity variant.")
 
     if gp_model_file.exists():
         model = Model3Fit(
             booster=booster,
             gp_model=gpb.GPModel(model_file=str(gp_model_file)),
             HF_only=HF_only,
+            gp_input_mean=(np.asarray(scaling["mean"], dtype=float)
+                           if scaling.get("mean") is not None else None),
+            gp_input_std=(np.asarray(scaling["std"], dtype=float)
+                          if scaling.get("std") is not None else None),
         )
     else:
         model = booster
@@ -517,9 +568,18 @@ def load_model3(filename, HF_only=None):
         "HF_only": HF_only,
         "model_file": str(filename),
         "gp_model_file": str(gp_model_file) if gp_model_file.exists() else None,
+        "input_scaling": scaling,
     }
     _model3_last_prediction = None
     return model
+
+
+def _scale_gp_coordinates(coords, mean, std):
+    """Scale physical coordinates without mutating inputs or MF fidelity flags."""
+    scaled = np.array(coords, dtype=float, copy=True)
+    n_features = len(mean)
+    scaled[:, :n_features] = (scaled[:, :n_features] - mean) / std
+    return scaled
 
 
 def make_model3_gp_model(gp_coords, HF_only=False, gp_kwargs=None):

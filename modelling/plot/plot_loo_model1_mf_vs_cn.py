@@ -43,7 +43,15 @@ def main():
     figure.savefig(output_path, dpi=200, facecolor=SURFACE, bbox_inches="tight")
     plt.close(figure)
 
+    nrmse_figure = plot_nrmse(summary)
+    nrmse_path = RESULTS_DIR / "model1_mf_vs_cn_loo_nrmse_per_wavelength.png"
+    nrmse_figure.savefig(
+        nrmse_path, dpi=200, facecolor=SURFACE, bbox_inches="tight"
+    )
+    plt.close(nrmse_figure)
+
     print(f"Saved {output_path}")
+    print(f"Saved {nrmse_path}")
     print(f"Saved {summary_path}")
     print(f"Saved {overall_path}")
     for row in overall.itertuples(index=False):
@@ -208,6 +216,35 @@ def plot_residuals(residuals, summary):
         x=0.08, y=0.99, ha="left", fontsize=15, color=INK,
     )
     figure.tight_layout(rect=(0, 0, 1, 0.965))
+    return figure
+
+
+def plot_nrmse(summary):
+    figure, ax = plt.subplots(figsize=(12, 5.8))
+    figure.patch.set_facecolor(SURFACE)
+
+    for label, color in (("Model 1 MF", MODEL1_COLOR), ("CN model", CN_COLOR)):
+        panel = summary[summary["model"] == label]
+        mean = panel["nrmse"].mean()
+        ax.plot(
+            panel["wavelength"], panel["nrmse"], color=color, linewidth=2,
+            label=f"{label} (mean {mean:.4f})",
+        )
+
+    ax.set_title(
+        "LOO NRMSE per wavelength: Model 1 multi-fidelity vs CN model",
+        loc="left", fontsize=15, color=INK, pad=14,
+    )
+    ax.set_xlabel("Wavelength (μm)")
+    ax.set_ylabel("NRMSE")
+    ax.set_facecolor(SURFACE)
+    ax.grid(True, color=GRID, linewidth=0.8)
+    ax.set_axisbelow(True)
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.tick_params(colors=INK_SECONDARY)
+    ax.legend(frameon=False, ncol=2, loc="upper left")
+    ax.margins(x=0.01)
+    figure.tight_layout()
     return figure
 
 

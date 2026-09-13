@@ -22,6 +22,13 @@ variants independently. Edit LF_SAMPLE_SIZE to change how many low-fidelity
 rows are used in each multi-fidelity training set. Set it to None to use all
 low-fidelity rows. Each completed lane is written immediately under
 results/cv/loo/lanes; a rerun skips lanes already on disk unless FRESH_RUN.
+
+Every setting in the configuration block can also come from a CV_LOO_-prefixed
+environment variable, which is how the SLURM scripts in euler/ drive this file
+without editing it. Those runs also shard: CV_LOO_SHARD_INDEX/SHARD_COUNT give
+each array task a stride through the lane list, each task runs with
+CV_LOO_WRITE_OUTPUTS=0, and one dependent job with CV_LOO_ASSEMBLE_ONLY=1
+assembles every lane file into the summary CSVs.
 """
 
 import os
@@ -74,49 +81,132 @@ def common_response_indexes(n_response_sample):
     )
 
 
+# ---------------------------------------------------------------------------
+# Environment overrides
+#
+# Every setting below can also be given as an environment variable, so a batch
+# job can pick models, fold counts, and output directories without editing this
+# file and without a working copy that differs from the one in git. An unset
+# variable leaves the literal default alone, so running the script by hand
+# behaves exactly as it did before.
+# ---------------------------------------------------------------------------
+
+ENV_PREFIX = "CV_LOO_"
+
+
+def env_value(name):
+    value = os.environ.get(ENV_PREFIX + name)
+    if value is None:
+        return None
+    value = value.strip()
+    return value or None
+
+
+def env_flag(name, default):
+    value = env_value(name)
+    if value is None:
+        return default
+
+    lowered = value.lower()
+    if lowered in ("1", "true", "yes", "on"):
+        return True
+    if lowered in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"{ENV_PREFIX}{name} must be a boolean, got {value!r}.")
+
+
+def env_int(name, default):
+    """An integer, or None when the variable is set to the string "none"."""
+    value = env_value(name)
+    if value is None:
+        return default
+    if value.lower() == "none":
+        return None
+
+    try:
+        return int(value)
+    except ValueError:
+        raise ValueError(
+            f"{ENV_PREFIX}{name} must be an integer or 'none', got {value!r}."
+        ) from None
+
+
+def env_path(name, default):
+    """A directory. A relative value is taken against the project root."""
+    value = env_value(name)
+    if value is None:
+        return default
+
+    path = Path(value).expanduser()
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+def env_json(name, default):
+    """A JSON object, for the nested keyword-argument settings."""
+    value = env_value(name)
+    if value is None:
+        return default
+    if value.lower() == "none":
+        return None
+
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError as error:
+        raise ValueError(f"{ENV_PREFIX}{name} must be JSON: {error}") from None
+    if not isinstance(parsed, dict):
+        raise ValueError(f"{ENV_PREFIX}{name} must be a JSON object.")
+    return parsed
+
+
 # Worker processes. Throughput on this machine saturates around here: the MF
 # fits are memory-bandwidth-bound, so 1->4 workers is 3.1x, 4->8 reaches 4.2x,
-# and 10 workers only adds another 5% while risking thermal throttling.
-CV_CPU = 8
+# and 10 workers only adds another 5% while risking thermal throttling. On a
+# cluster this should match the CPUs the job was allocated.
+CV_CPU = env_int("CPU", 8)
 
 # Toggle which models and variants are run.
-RUN_MODEL1 = False
-RUN_MODEL2 = True
-RUN_MODEL3 = False
-RUN_SF = True
-RUN_MF = True
+RUN_MODEL1 = env_flag("RUN_MODEL1", False)
+RUN_MODEL2 = env_flag("RUN_MODEL2", True)
+RUN_MODEL3 = env_flag("RUN_MODEL3", False)
+RUN_SF = env_flag("RUN_SF", True)
+RUN_MF = env_flag("RUN_MF", True)
 
-# Seed each Model 1 MF fold's optimiser with the previous fold's fitted
-# covariance parameters. Cuts an MF fit from ~34s to ~12s, but it is NOT
-# numerically neutral: the AR(1) MF likelihood surface is flat enough that the
-# optimum reached depends on where the optimiser starts. Warm fits land on an
-# equal-or-slightly-better likelihood, but predictions move by ~1e-4 relative
-# and predictive variance by up to ~3%, which shifted per-wavelength NRMSE by
-# up to 2.4% in a small comparison. Tightening delta_rel_conv does not close the
-# gap, so this is a different local optimum rather than early stopping. Off by
-# default: results reproduce the per-fold implementation bit-for-bit.
-WARM_START_MODEL1_MF = False
+WARM_START_MODEL1_MF = env_flag("WARM_START_MODEL1_MF", False)
 
 # Delete existing lane files and start over instead of resuming.
-FRESH_RUN = False
+FRESH_RUN = env_flag("FRESH_RUN", False)
 
 # Cap the number of LOO folds. None runs all of them; a small number is useful
 # for equivalence checks against a previous run.
-MAX_FOLDS = None
+MAX_FOLDS = env_int("MAX_FOLDS", None)
 
-LF_SAMPLE_SIZE = 1000
-LF_SAMPLE_RANDOM_STATE = 42
+LF_SAMPLE_SIZE = env_int("LF_SAMPLE_SIZE", 1000)
+LF_SAMPLE_RANDOM_STATE = env_int("LF_SAMPLE_RANDOM_STATE", 42)
 # Sample a separate set of wavelengths within every Model 2 training spectrum.
 # Held-out HF spectra are still predicted at all 195 wavelengths.
-MODEL2_N_WAVELENGTHS = 50
-MODEL2_WAVELENGTH_RANDOM_STATE = 42
-RESULTS_DIR = PROJECT_ROOT / "results" / "cv" / "loo"
+MODEL2_N_WAVELENGTHS = env_int("MODEL2_N_WAVELENGTHS", 50)
+MODEL2_WAVELENGTH_RANDOM_STATE = env_int("MODEL2_WAVELENGTH_RANDOM_STATE", 42)
+# One results directory per training set. Lane files are named by model, so
+# several models can share a directory, but two runs with different LF sample
+# sizes must not: they would overwrite each other's run_config.json and leave
+# lane files from two different training sets side by side.
+RESULTS_DIR = env_path("RESULTS_DIR", PROJECT_ROOT / "results" / "cv" / "loo")
 CV_LABEL = "loo"
 LANE_RESULTS_DIR = RESULTS_DIR / "lanes"
 
+# Split the lanes across cluster array tasks: shard i of n runs every n-th
+# lane. One shard, the default, runs all of them.
+SHARD_INDEX = env_int("SHARD_INDEX", 0)
+SHARD_COUNT = env_int("SHARD_COUNT", 1)
+
+# An array task fits lanes and leaves assembly to a single dependent job, which
+# runs with ASSEMBLE_ONLY and fits nothing.
+WRITE_OUTPUTS = env_flag("WRITE_OUTPUTS", True)
+ASSEMBLE_ONLY = env_flag("ASSEMBLE_ONLY", False)
+
 # None means all 195 wavelengths. Set N_RESPONSE_SAMPLE to tune the shared
 # empirical-density wavelength subset used by all enabled wavelength-wise models.
-N_RESPONSE_SAMPLE = None
+N_RESPONSE_SAMPLE = env_int("N_RESPONSE_SAMPLE", None)
 COMMON_RESPONSE_INDEXES = common_response_indexes(N_RESPONSE_SAMPLE)
 MODEL1_RESPONSE_INDEXES = COMMON_RESPONSE_INDEXES
 MODEL2_RESPONSE_INDEXES = COMMON_RESPONSE_INDEXES
@@ -126,8 +216,8 @@ MODEL3_RESPONSE_INDEXES = COMMON_RESPONSE_INDEXES
 # tune_model3_parameters defaults, e.g. {"n_trials": 20, "validation_fraction": 0.2}.
 # verbose_eval is forced to 0: fit_model3 does not forward its own verbose_eval
 # to the tuner, whose default prints ~100 trial lines per fit.
-MODEL3_TUNING_KWARGS = None
-MODEL3_GP_KWARGS = None
+MODEL3_TUNING_KWARGS = env_json("MODEL3_TUNING_KWARGS", None)
+MODEL3_GP_KWARGS = env_json("MODEL3_GP_KWARGS", None)
 
 
 def log(message):
@@ -529,7 +619,7 @@ def save_lane_output(rows, model_name, key, kind, sort):
         sort_predictions(lane_output)
 
     output_file = lane_output_file(model_name, key, kind)
-    temporary_file = output_file.with_suffix(".csv.tmp")
+    temporary_file = output_file.with_name(f"{output_file.name}.{os.getpid()}.tmp")
     lane_output.to_csv(temporary_file, index=False)
     os.replace(temporary_file, output_file)
 
@@ -610,19 +700,43 @@ def main():
     del full_data, cv_data
 
     tasks = all_tasks()
-    outstanding = pending_tasks(tasks)
+    owned = shard_tasks(tasks)
+    outstanding = pending_tasks(owned)
     log(
-        f"Lanes: {len(tasks)} total, {len(tasks) - len(outstanding)} already on disk, "
+        f"Lanes: {len(tasks)} total, {len(owned)} owned by this shard, "
+        f"{len(owned) - len(outstanding)} already on disk, "
         f"{len(outstanding)} to run on {CV_CPU} workers"
     )
 
-    if outstanding:
+    if ASSEMBLE_ONLY:
+        log("ASSEMBLE_ONLY: fitting nothing, assembling the lane files on disk.")
+    elif outstanding:
         run_lanes(outstanding)
     else:
-        log("Nothing to run; assembling results from existing lane files.")
+        log("Nothing to run for this shard.")
+
+    if not WRITE_OUTPUTS:
+        log(
+            f"Finished lanes in {elapsed_text(run_start)}. Assembly is left to the "
+            f"job that runs with CV_LOO_ASSEMBLE_ONLY=1."
+        )
+        return
 
     write_outputs()
     log(f"Finished LOO CV in {elapsed_text(run_start)}. Results are in {RESULTS_DIR}")
+
+
+def shard_tasks(tasks):
+    """The lanes this array task owns: every SHARD_COUNT-th lane from its offset.
+
+    Sharding the full task list rather than the pending one keeps the partition
+    identical in every array task, whatever each one finds already on disk when
+    it starts. Lanes are ordered heaviest-model-first, so taking a stride
+    through the list gives every shard a comparable mix of work.
+    """
+    if SHARD_COUNT == 1:
+        return tasks
+    return tasks[SHARD_INDEX::SHARD_COUNT]
 
 
 def run_lanes(tasks):
@@ -748,8 +862,11 @@ def read_lane_files(kind):
 def prepare_incremental_outputs():
     if not FRESH_RUN:
         # Leave completed lanes in place; pending_tasks skips them on a rerun.
-        for stale in LANE_RESULTS_DIR.glob("*.csv.tmp"):
-            stale.unlink()
+        # Sharded runs skip the sweep: a sibling array task may be part way
+        # through writing one of these temporary files right now.
+        if SHARD_COUNT == 1:
+            for stale in LANE_RESULTS_DIR.glob("*.tmp"):
+                stale.unlink()
         return
 
     for lane_file in LANE_RESULTS_DIR.glob("*.csv*"):
@@ -789,6 +906,19 @@ def validate_run_selection():
         raise ValueError("At least one of RUN_SF or RUN_MF must be True.")
     if CV_CPU < 1:
         raise ValueError("CV_CPU must be at least 1.")
+    if SHARD_COUNT < 1:
+        raise ValueError("CV_LOO_SHARD_COUNT must be at least 1.")
+    if not 0 <= SHARD_INDEX < SHARD_COUNT:
+        raise ValueError(
+            f"CV_LOO_SHARD_INDEX must be between 0 and {SHARD_COUNT - 1}, "
+            f"got {SHARD_INDEX}."
+        )
+    if FRESH_RUN and SHARD_COUNT > 1:
+        raise ValueError(
+            "FRESH_RUN with more than one shard would let every array task "
+            "delete the lanes its siblings are writing. Clear the lane "
+            "directory before submitting instead."
+        )
     if RUN_MODEL2 and MODEL2_N_WAVELENGTHS is not None:
         if not isinstance(MODEL2_N_WAVELENGTHS, (int, np.integer)):
             raise ValueError("MODEL2_N_WAVELENGTHS must be an integer or None.")
@@ -846,7 +976,9 @@ def log_run_setup(full_data, cv_data):
         f"model3_response_indexes={model3_response_count}, "
         f"model2_n_wavelengths_per_training_spectrum={MODEL2_N_WAVELENGTHS}, "
         f"cv_cpu={CV_CPU}, warm_start_model1_mf={WARM_START_MODEL1_MF}, "
-        f"fresh_run={FRESH_RUN}, max_folds={MAX_FOLDS}"
+        f"fresh_run={FRESH_RUN}, max_folds={MAX_FOLDS}, "
+        f"shard={SHARD_INDEX + 1}/{SHARD_COUNT}, "
+        f"assemble_only={ASSEMBLE_ONLY}, write_outputs={WRITE_OUTPUTS}"
     )
     log(
         "Data setup: "
@@ -874,8 +1006,13 @@ def save_run_config(full_data, cv_data):
     lf_sample = cv_data[cv_data["is_hf"].eq(0)]
     hf_sample = cv_data[cv_data["is_hf"].eq(1)]
 
+    # Written atomically: array tasks all write these, and a worker reading a
+    # half-written lf_sample_source_indices.csv would fail its sample check.
     lf_sample_indices = pd.DataFrame({"source_index": lf_sample.index})
-    lf_sample_indices.to_csv(RESULTS_DIR / "lf_sample_source_indices.csv", index=False)
+    write_atomically(
+        RESULTS_DIR / "lf_sample_source_indices.csv",
+        lf_sample_indices.to_csv(index=False),
+    )
 
     config = {
         "cv_method": "hf_loo",
@@ -912,10 +1049,14 @@ def save_run_config(full_data, cv_data):
         "lane_results_dir": str(LANE_RESULTS_DIR),
     }
 
-    (RESULTS_DIR / "run_config.json").write_text(
-        json.dumps(config, indent=2),
-        encoding="utf-8",
-    )
+    write_atomically(RESULTS_DIR / "run_config.json", json.dumps(config, indent=2))
+
+
+def write_atomically(output_file, content):
+    """Write text through a shard-private temporary file, then rename it."""
+    temporary_file = output_file.with_name(f"{output_file.name}.{os.getpid()}.tmp")
+    temporary_file.write_text(content, encoding="utf-8")
+    os.replace(temporary_file, output_file)
 
 
 def has_sf_and_mf(metrics, model):
