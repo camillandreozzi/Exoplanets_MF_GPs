@@ -9,7 +9,7 @@ from pathlib import Path
 import os
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
-RESULTS_DIR = PROJECT_ROOT / "results" / "cv" / "loo"
+RESULTS_DIR = PROJECT_ROOT / "results" / "cv" / "loo_lf10000"
 os.environ.setdefault("MPLCONFIGDIR", str(RESULTS_DIR / ".matplotlib"))
 
 import matplotlib
@@ -137,11 +137,11 @@ def summarise(residuals):
         )
         .sort_values(["model", "wavelength"])
     )
-    y_range = (
-        residuals.groupby("wavelength")["y_true"].agg(lambda x: x.max() - x.min())
+    y_std = (
+        residuals.groupby("wavelength")["y_true"].std(ddof=0)
     )
-    summary["y_true_range"] = summary["wavelength"].map(y_range)
-    summary["nrmse"] = summary["rmse"] / summary["y_true_range"].replace(0, np.nan)
+    summary["y_true_std"] = summary["wavelength"].map(y_std)
+    summary["nrmse"] = summary["rmse"] / summary["y_true_std"].replace(0, np.nan)
     return summary
 
 

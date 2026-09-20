@@ -5,16 +5,15 @@ keeps wavelength. This one is the transpose: it collapses wavelength and keeps
 the held-out sample, so each point is one LOO fold scored over its whole
 spectrum.
 
-Metric definitions, matching the normalisation used by the earlier
-model1_loo_sf_vs_mf_nrmse_per_sample.csv:
+Metric definitions (population standard deviation, ddof=0):
 
-    NRMSE_s = sqrt( mean_w residual_sw^2 ) / range_s
+    NRMSE_s = sqrt( mean_w residual_sw^2 ) / std_s
     MAE_s   = mean_w | residual_sw |
 
-where range_s is the held-out sample's own y_true range across its spectrum.
+where std_s is the standard deviation of the held-out sample's y_true spectrum.
 Note this is a different normaliser from the per-wavelength figure, which
-divides by each wavelength's range across folds, so the NRMSE levels here are
-not directly comparable with that figure's.
+divides by each wavelength's standard deviation across folds, so the NRMSE
+levels here are not directly comparable with that figure's.
 
 Each panel is a paired scatter: one point per held-out sample, SF on x and MF
 on y, against the y = x line. Below the line means multi-fidelity won for that
@@ -121,13 +120,13 @@ def compute_per_sample(predictions):
         mae=("error", lambda column: float(np.mean(np.abs(column)))),
         bias=("error", "mean"),
         max_abs_error=("error", lambda column: float(np.max(np.abs(column)))),
-        y_true_range=("y_true", lambda column: float(column.max() - column.min())),
+        y_true_std=("y_true", lambda column: float(column.std(ddof=0))),
     )
 
-    # One normaliser per held-out sample: the range of its own spectrum.
-    grouped["nrmse"] = grouped["rmse"] / grouped["y_true_range"]
+    # Normalize each held-out sample by its spectrum's population std.
+    grouped["nrmse"] = grouped["rmse"] / grouped["y_true_std"].replace(0, np.nan)
 
-    wide = grouped.pivot_table(
+    wide = grouped.pivot(
         index=["model", "held_out_source_index", "fold"],
         columns="variant",
         values=[
@@ -137,7 +136,7 @@ def compute_per_sample(predictions):
             "mae",
             "bias",
             "max_abs_error",
-            "y_true_range",
+            "y_true_std",
         ],
     )
     wide.columns = [f"{metric}_{variant}" for metric, variant in wide.columns]
@@ -192,7 +191,7 @@ def plot_grid(per_sample):
         0.06,
         0.947,
         "97 held-out samples · 195 wavelengths each · NRMSE normalised by each "
-        "sample's own spectrum range · below the diagonal = MF better",
+        "sample's spectrum standard deviation · below the diagonal = MF better",
         ha="left",
         fontsize=10,
         color=INK_SECONDARY,

@@ -27,8 +27,18 @@ import emcee
 import numpy as np
 import pandas as pd
 
-from bayesian_inversion.emulator import DEFAULT_WORKERS, MFEmulator, benchmark
-from bayesian_inversion.noise import emulator_error_covariance, error_budget_summary
+from bayesian_inversion.emulator import (
+    DEFAULT_FAMILY,
+    DEFAULT_WORKERS,
+    MODEL_FAMILIES,
+    MFEmulator,
+    benchmark,
+)
+from bayesian_inversion.noise import (
+    LOO_PREDICTIONS,
+    emulator_error_covariance,
+    error_budget_summary,
+)
 from bayesian_inversion.observations import load_observation
 from bayesian_inversion.plot_posterior import plot_from_run
 from bayesian_inversion.posterior import LogPosterior
@@ -139,6 +149,12 @@ def posterior_summary(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--target", choices=["sample81", "observed"], required=True)
+    parser.add_argument(
+        "--model",
+        choices=sorted(MODEL_FAMILIES),
+        default=DEFAULT_FAMILY,
+        help="stored fit to use as the forward model (default: %(default)s)",
+    )
     parser.add_argument("--nwalkers", type=int, default=96)
     parser.add_argument("--nsteps", type=int, default=4000)
     parser.add_argument("--burn-frac", type=float, default=0.5)
@@ -156,16 +172,23 @@ def main() -> None:
     if args.nwalkers < 2 * N_PARAMS:
         parser.error(f"--nwalkers must be at least {2 * N_PARAMS} for {N_PARAMS} parameters")
 
-    output_dir = RESULTS_DIR / args.target
+    # Keyed by model family as well as target. A chain is only resumable against
+    # the forward model that produced it, and sharing one directory would let a
+    # --resume silently graft Model 3 steps onto a Model 1 chain.
+    results_dir = RESULTS_DIR / args.model
+    output_dir = results_dir / args.target
     output_dir.mkdir(parents=True, exist_ok=True)
     rng = np.random.default_rng(args.seed)
 
     observation = load_observation(args.target)
 
     print(f"target        : {observation.name}")
+    print(f"model         : {args.model} (MF)")
     print(f"wavelengths   : {len(observation.y)}")
 
-    emulator_cov = emulator_error_covariance(diagonal=args.diagonal_emulator_error)
+    emulator_cov = emulator_error_covariance(
+        diagonal=args.diagonal_emulator_error, model=args.model
+    )
     budget = error_budget_summary(observation, emulator_cov)
     budget.to_csv(output_dir / "error_budget.csv", index=False)
     print(
@@ -173,7 +196,7 @@ def main() -> None:
         f"{budget['ratio_emulator_to_obs'].median():.2f}"
     )
 
-    with MFEmulator(n_workers=args.workers) as emulator:
+    with MFEmulator(n_workers=args.workers, family=args.model) as emulator:
         ms_per_theta = benchmark(emulator, batch_size=args.nwalkers)
         seconds_per_step = ms_per_theta * args.nwalkers / 1000.0
         print(
@@ -246,7 +269,13 @@ def main() -> None:
 
     config = {
         "target": args.target,
-        "model_source": "results/model1/full_fit (MF, HF sample 81 held out)",
+        "model": args.model,
+        "model_source": (
+            f"results/{args.model}/full_fit (MF, HF sample 81 held out)"
+        ),
+        "emulator_residual_source": str(
+            LOO_PREDICTIONS.relative_to(PROJECT_ROOT)
+        ),
         "nwalkers": args.nwalkers,
         "nsteps": args.nsteps,
         "steps_in_chain": int(full_chain.shape[0]),
@@ -285,7 +314,7 @@ def main() -> None:
             f"{covered}/{N_PARAMS} parameters"
         )
 
-    plot_from_run(args.target)
+    plot_from_run(args.target, results_dir)
     print(f"\nwritten to {output_dir}")
 
 

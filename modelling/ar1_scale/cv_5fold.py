@@ -331,18 +331,18 @@ def iter_hf_kfold_splits(data, n_folds, random_state):
 
 
 def metric_table(predictions, keys):
-    """Range-normalized RMSE; a zero target range gives undefined NRMSE."""
+    """NRMSE uses target population std (ddof=0); zero std gives NaN."""
     rows = []
     for key, group in predictions.groupby(keys):
         if not isinstance(key, tuple):
             key = (key,)
         residual = group.y_pred.to_numpy() - group.y_true.to_numpy()
-        span = float(group.y_true.max() - group.y_true.min())
+        y_std = float(group.y_true.std(ddof=0))
         rmse = float(np.sqrt(np.mean(residual**2)))
         rows.append(dict(zip(keys, key), n=len(group), rmse=rmse,
                          mae=float(np.mean(np.abs(residual))),
-                         nrmse=rmse / span if span > 0 else np.nan,
-                         y_true_range=span))
+                         nrmse=rmse / y_std if y_std > 0 else np.nan,
+                         y_true_std=y_std))
     return pd.DataFrame(rows)
 
 
@@ -455,7 +455,7 @@ def main():
         fidelity_scaling="none: categorical 0/1 kernel indicator",
         settings={name: value for name, value in globals().items()
                   if name.isupper() and isinstance(value, (int, float, bool, tuple))},
-        nrmse="RMSE / (max observed - min observed) within each reported group; NaN for zero range",
+        nrmse="RMSE / std(observed, ddof=0) within each reported group; NaN for zero standard deviation",
         residual="predicted - observed")
     (output / "run_config.json").write_text(json.dumps(config, indent=2) + "\n")
     pd.DataFrame({"source_index": data.index[data.is_hf.eq(0)]}).to_csv(

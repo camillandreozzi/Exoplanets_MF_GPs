@@ -46,7 +46,8 @@ CSV outputs include fold checkpoints, pooled out-of-fold predictions,
 covariance parameters (including rho), metrics per wavelength, fold, and
 spectrum, and an overall summary. The wavelength comparison reports NRMSE,
 MAE, RMSE, and B-minus-A differences (negative favors B). NRMSE divides RMSE
-by the observed target range within each reported group; zero range gives NaN.
+by the observed target population standard deviation (`ddof=0`) within each
+reported group; zero standard deviation gives NaN.
 The summary distinguishes pooled metrics from mean per-wavelength metrics.
 Noise and signal variances are saved in original response units squared;
 length scales refer to standardized input coordinates.

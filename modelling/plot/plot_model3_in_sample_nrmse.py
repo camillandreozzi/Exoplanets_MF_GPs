@@ -49,7 +49,7 @@ def compute_model3_nrmse():
         response_col = f"response_{response_index}"
         validation_data = hf_data.loc[:, [*x_columns, "is_hf", response_col]].copy()
         y_true = validation_data[response_col].to_numpy(dtype=float)
-        y_range = np.ptp(y_true)
+        y_std = np.std(y_true, ddof=0)
 
         sf_rmse = predict_rmse(
             validation_data,
@@ -64,8 +64,8 @@ def compute_model3_nrmse():
             hf_only=False,
         )
 
-        sf_nrmse = normalize_rmse(sf_rmse, y_range)
-        mf_nrmse = normalize_rmse(mf_rmse, y_range)
+        sf_nrmse = normalize_rmse(sf_rmse, y_std)
+        mf_nrmse = normalize_rmse(mf_rmse, y_std)
         rows.append(
             {
                 "wavelength": wavelength_map[response_index],
@@ -99,10 +99,11 @@ def predict_rmse(validation_data, y_true, model_file, hf_only):
     return float(np.sqrt(np.mean(residuals**2)))
 
 
-def normalize_rmse(rmse, y_range):
-    if y_range == 0:
+def normalize_rmse(rmse, y_std):
+    """Divide RMSE by the reference population standard deviation (ddof=0)."""
+    if y_std == 0:
         return np.nan
-    return float(rmse / y_range)
+    return float(rmse / y_std)
 
 
 def winner(sf_nrmse, mf_nrmse):

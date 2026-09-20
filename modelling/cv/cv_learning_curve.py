@@ -702,6 +702,7 @@ def per_wavelength_metrics(predictions):
             n_cv=("y_true", "size"),
             y_true_min=("y_true", "min"),
             y_true_max=("y_true", "max"),
+            y_true_std=("y_true", lambda values: values.std(ddof=0)),
             rmse=("residual", rmse),
             mae=("residual", mean_absolute),
             bias=("residual", "mean"),
@@ -710,8 +711,8 @@ def per_wavelength_metrics(predictions):
         .reset_index()
     )
 
-    y_range = metrics["y_true_max"] - metrics["y_true_min"]
-    metrics["nrmse"] = metrics["rmse"] / y_range.replace(0, np.nan)
+    # Normalize by the population standard deviation of the reference values.
+    metrics["nrmse"] = metrics["rmse"] / metrics["y_true_std"].replace(0, np.nan)
     return metrics[
         [
             "n_hf_train",
@@ -727,6 +728,7 @@ def per_wavelength_metrics(predictions):
             "max_abs_error",
             "y_true_min",
             "y_true_max",
+            "y_true_std",
         ]
     ]
 

@@ -1,4 +1,4 @@
-"""Summarize full-fit HF in-sample RMSE/NRMSE for all models."""
+"""Summarize full-fit HF in-sample errors; NRMSE uses target std (ddof=0)."""
 
 from pathlib import Path
 import os
@@ -242,7 +242,7 @@ def predict_gp_model1_like(model, validation_data, hf_only):
 
 
 def per_wavelength_metrics(model_name, variant, wavelengths, y_true, residuals):
-    y_ranges = np.ptp(y_true, axis=0)
+    y_stds = np.std(y_true, axis=0, ddof=0)
     rows = []
     for response_index, wavelength in enumerate(wavelengths):
         rows.append(
@@ -254,7 +254,7 @@ def per_wavelength_metrics(model_name, variant, wavelengths, y_true, residuals):
                 sample_index=None,
                 full_data_index=None,
                 n=len(y_true),
-                y_range=y_ranges[response_index],
+                y_std=y_stds[response_index],
                 residuals=residuals[:, response_index],
             )
         )
@@ -262,7 +262,7 @@ def per_wavelength_metrics(model_name, variant, wavelengths, y_true, residuals):
 
 
 def per_sample_metrics(model_name, variant, full_data_index, y_true, residuals):
-    y_ranges = np.ptp(y_true, axis=1)
+    y_stds = np.std(y_true, axis=1, ddof=0)
     rows = []
     for sample_index, source_index in enumerate(full_data_index):
         rows.append(
@@ -274,7 +274,7 @@ def per_sample_metrics(model_name, variant, full_data_index, y_true, residuals):
                 sample_index=sample_index,
                 full_data_index=source_index,
                 n=RESPONSE_DIM,
-                y_range=y_ranges[sample_index],
+                y_std=y_stds[sample_index],
                 residuals=residuals[sample_index, :],
             )
         )
@@ -289,7 +289,7 @@ def metric_row(
     sample_index,
     full_data_index,
     n,
-    y_range,
+    y_std,
     residuals,
 ):
     residuals = np.asarray(residuals, dtype=float)
@@ -297,7 +297,7 @@ def metric_row(
     mae = float(np.mean(np.abs(residuals)))
     bias = float(np.mean(residuals))
     max_abs_error = float(np.max(np.abs(residuals)))
-    nrmse = np.nan if y_range == 0 else float(rmse / y_range)
+    nrmse = np.nan if y_std == 0 else float(rmse / y_std)
 
     return {
         "model": model_name,
@@ -307,7 +307,7 @@ def metric_row(
         "sample_index": sample_index,
         "full_data_index": full_data_index,
         "n": n,
-        "y_range": float(y_range),
+        "y_std": float(y_std),
         "rmse": rmse,
         "nrmse": nrmse,
         "mae": mae,
@@ -317,7 +317,7 @@ def metric_row(
 
 
 def global_metrics(model_name, variant, y_true, residuals):
-    y_range = np.ptp(y_true)
+    y_std = np.std(y_true, ddof=0)
     row = metric_row(
         model_name=model_name,
         variant=variant,
@@ -326,7 +326,7 @@ def global_metrics(model_name, variant, y_true, residuals):
         sample_index=None,
         full_data_index=None,
         n=residuals.size,
-        y_range=y_range,
+        y_std=y_std,
         residuals=residuals.reshape(-1),
     )
     return {
@@ -337,7 +337,7 @@ def global_metrics(model_name, variant, y_true, residuals):
             "model",
             "variant",
             "n",
-            "y_range",
+            "y_std",
             "rmse",
             "nrmse",
             "mae",
@@ -375,14 +375,14 @@ def summarize_distribution(metrics, scope):
 def per_wavelength_wide(per_wavelength):
     return metric_wide(
         per_wavelength,
-        index_columns=["response_index", "wavelength", "n", "y_range"],
+        index_columns=["response_index", "wavelength", "n", "y_std"],
     )
 
 
 def per_sample_wide(per_sample):
     return metric_wide(
         per_sample,
-        index_columns=["sample_index", "full_data_index", "n", "y_range"],
+        index_columns=["sample_index", "full_data_index", "n", "y_std"],
     )
 
 

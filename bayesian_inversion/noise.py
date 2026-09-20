@@ -35,25 +35,38 @@ from sklearn.covariance import LedoitWolf
 
 from bayesian_inversion.observations import N_WAVELENGTHS, Observation
 
-LOO_PREDICTIONS = PROJECT_ROOT / "results/cv/loo/loo_predictions.csv"
+# The lf10000 run, not results/cv/loo: it is the one fit against the full 10 000
+# LF rows for every model, and the only one carrying Model 3 at all 195
+# wavelengths (results/cv/loo has Model 3 at 28).
+LOO_PREDICTIONS = PROJECT_ROOT / "results/cv/loo_lf10000/loo_predictions.csv"
 
-MODEL = "model1"
+DEFAULT_MODEL = "model3"
 VARIANT = "mf"
 
 
-def emulator_residuals(path: Path = LOO_PREDICTIONS) -> np.ndarray:
-    """The (97, 195) matrix of leave-one-out residuals for Model 1 MF.
+def emulator_residuals(
+    path: Path = LOO_PREDICTIONS, model: str = DEFAULT_MODEL
+) -> np.ndarray:
+    """The (97, 195) matrix of leave-one-out residuals for ``model``'s MF fit.
 
     Each row is one held-out HF sample; each column one wavelength. These are
     genuine out-of-sample errors -- exactly the quantity the likelihood needs -- so
     the emulator error budget is measured, not assumed.
+
+    ``model`` must name the same family the forward model comes from, so the
+    likelihood scores a prediction against its own measured error. The two
+    families turn out to be close on the diagonal -- median sigma_em 1.17e-4 for
+    Model 1 against 1.15e-4 for Model 3 -- so mismatching them does not blow the
+    error budget up. They differ in correlation structure instead: the Model 1
+    covariance has condition 2.1e3 against Model 3's 5.9e2, which is what the
+    off-diagonal terms of the likelihood actually see.
     """
     predictions = pd.read_csv(path)
     subset = predictions[
-        (predictions["model"] == MODEL) & (predictions["variant"] == VARIANT)
+        (predictions["model"] == model) & (predictions["variant"] == VARIANT)
     ]
     if subset.empty:
-        raise ValueError(f"No {MODEL}/{VARIANT} rows found in {path}")
+        raise ValueError(f"No {model}/{VARIANT} rows found in {path}")
 
     residuals = subset.pivot_table(
         index="held_out_source_index", columns="response_index", values="residual"
@@ -69,7 +82,9 @@ def emulator_residuals(path: Path = LOO_PREDICTIONS) -> np.ndarray:
 
 
 def emulator_error_covariance(
-    path: Path = LOO_PREDICTIONS, diagonal: bool = False
+    path: Path = LOO_PREDICTIONS,
+    diagonal: bool = False,
+    model: str = DEFAULT_MODEL,
 ) -> np.ndarray:
     """Estimate ``Sigma_em`` (195, 195) from the leave-one-out residuals.
 
@@ -80,7 +95,7 @@ def emulator_error_covariance(
     recommended setting -- it discards the cross-wavelength correlation the docstring
     above argues is essential -- but it is a useful sensitivity check.
     """
-    residuals = emulator_residuals(path)
+    residuals = emulator_residuals(path, model=model)
 
     if diagonal:
         return np.diag(residuals.var(axis=0, ddof=1))

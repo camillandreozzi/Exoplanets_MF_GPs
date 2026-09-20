@@ -84,7 +84,7 @@ class ARScaleTests(unittest.TestCase):
         metrics = cv.metric_table(data, ["model"]).set_index("model")
         self.assertAlmostEqual(metrics.loc["a", "rmse"], np.sqrt(2.5))
         self.assertAlmostEqual(metrics.loc["a", "mae"], 1.5)
-        self.assertAlmostEqual(metrics.loc["a", "nrmse"], np.sqrt(2.5) / 2)
+        self.assertAlmostEqual(metrics.loc["a", "nrmse"], np.sqrt(2.5))
         self.assertTrue(np.isnan(metrics.loc["b", "nrmse"]))
 
     def test_five_fold_pipeline(self):

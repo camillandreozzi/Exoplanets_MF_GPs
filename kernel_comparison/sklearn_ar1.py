@@ -431,7 +431,7 @@ def prediction_metrics(y_true, mean, observation_var, y_latent=None):
     """RMSE / NRMSE / MAE / negative log predictive density on held-out data."""
     y_true = np.asarray(y_true, dtype=float).ravel()
     residuals = mean - y_true
-    spread = float(np.std(y_true))
+    spread = float(np.std(y_true, ddof=0))
     metrics = {
         "rmse": float(np.sqrt(np.mean(residuals**2))),
         "nrmse": float(np.sqrt(np.mean(residuals**2)) / spread) if spread > 0 else np.nan,

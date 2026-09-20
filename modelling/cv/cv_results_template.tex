@@ -1,0 +1,154 @@
+\subsection{Cross-validated Surrogate Performance}
+\label{sec:cv_results}
+
+Table~\ref{tab:cv_metrics} collects the leave-one-out error metrics over
+$n_H=97$ high-fidelity designs. At each wavelength, NRMSE is the RMSE across
+held-out designs divided by the population standard deviation of the
+corresponding high-fidelity reference values ($\mathrm{ddof}=0$). The table
+reports arithmetic means of these per-wavelength NRMSE values, over either
+all $195$ bins or the indicated instrument band. These averages are distinct
+from a single pooled RMSE divided by the standard deviation of all
+$n_H\times m$ reference values.
+
+Under mean per-wavelength NRMSE, the ordering is Model~3 ($@@model3-mf_all_plain@@$),
+the PCA--PCE reference of \citet{Nussbaumer2026} ($@@cn_all_plain@@$),
+Model~1 ($@@model1-mf_all_plain@@$), the single-fidelity GPBoost baseline
+($@@model3-sf_all_plain@@$), and the single-fidelity GP baseline
+($@@model1-sf_all_plain@@$). Model~3 improves on the reference by
+$@@improvement_over_reference_percent@@\%$.
+
+To compare errors at the design level, we retain the same wavelength-specific
+standard deviations and form one score per held-out design,
+\[
+ q_i = \left[\frac{1}{m}\sum_{j=1}^{m}
+ \left(\frac{\widehat{y}_{ij}^{(-i)}-y_{ij}}{s_j}\right)^2\right]^{1/2},
+ \qquad
+ s_j = \left[\frac{1}{n_H}\sum_{i=1}^{n_H}
+ (y_{ij}-\bar y_j)^2\right]^{1/2}.
+\]
+Here $q_i$ is the root-mean-square standardized residual across wavelengths;
+it differs from dividing a spectrum's RMSE by that spectrum's own standard
+deviation. Two-sided Wilcoxon signed-rank comparisons use the $97$ paired
+scores, with Holm adjustment across the four comparisons below. The reported
+standard deviations of paired differences use $n_H-1$ in their denominator.
+
+Model~3 improves on Model~1 on $@@pair0_wins@@$ of $97$ designs, with a mean
+paired difference $q_i^{(1)}-q_i^{(3)}$ of $@@pair0_mean@@$
+(sd $@@pair0_sd@@$; unadjusted $p=@@pair0_wilcoxon_p@@$,
+adjusted $p=@@pair0_wilcoxon_p_holm@@$). Model~1 improves on the PCA--PCE
+reference on only $@@pair1_wins@@$ designs: the mean paired difference
+favours the reference by $@@pair1_mean@@$
+(unadjusted $p=@@pair1_wilcoxon_p@@$,
+adjusted $p=@@pair1_wilcoxon_p_holm@@$).
+Model~3 improves on the reference on $@@pair2_wins@@$ designs
+(unadjusted and adjusted $p=@@pair2_wilcoxon_p@@$), and on the
+single-fidelity GP on $@@pair3_wins@@$ designs
+(unadjusted $p=@@pair3_wilcoxon_p@@$,
+adjusted $p=@@pair3_wilcoxon_p_holm@@$).
+Thus the standardized design-level scores favour Model~3 over Model~1 and
+the single-fidelity GP, while the comparison with PCA--PCE remains
+inconclusive. These tests are exploratory because the leave-one-out training
+sets overlap; pairing avoids treating wavelength bins as independent
+replicates but does not make the fitted surrogates independent across folds.
+
+MAE gives a different ordering among the remaining architectures. Model~3
+leads at $@@model3_mae_ppm@@$ ppm, whereas Model~1 reaches
+$@@model1-mf_mae_ppm_plain@@$ ppm and is thereby worse than the
+single-fidelity GP baseline ($@@model1-sf_mae_ppm_plain@@$ ppm).
+For Model~3, mean per-wavelength NRMSE is similar in the NIRCam and MIRI bands
+($@@nircam_mean_nrmse@@$ and $@@miri_mean_nrmse@@$, respectively), while MAE
+increases from $@@below3_mae_ppm@@$ ppm for bin centres below $3\,\mu$m to
+$@@above10_mae_ppm@@$ ppm for bin centres strictly above $10\,\mu$m.
+Over those same slices, the mean high-fidelity eclipse depth increases from
+$@@below3_hf_mean_ppm@@$ to $@@above10_hf_mean_ppm@@$ ppm, a factor of
+$@@hf_amplitude_ratio@@$. Long-wavelength bins therefore account for much of
+the absolute error without having larger band-averaged standardized error.
+
+The best surrogate reaches $\mathrm{MAE}=@@model3_mae_ppm@@$ ppm, or
+$@@model3_mae_over_sigma@@\,\bar\sigma_{\mathrm{obs}}$, where
+$\bar\sigma_{\mathrm{obs}}=@@sigma_obs_ppm@@$ ppm is obtained by averaging
+the lower and upper observational error bars within each bin and then across
+bins. Its per-bin MAE is below this bin's observational uncertainty in
+$@@bins_mae_below_sigma@@$ of $195$ bins; its per-bin RMSE is below that
+uncertainty in $@@bins_rmse_below_sigma@@$ bins. Emulation error is therefore
+comparable to the observational error scale. This supports retaining emulator
+uncertainty in the retrieval likelihood
+\eqref{eq:inversion-surrogate-likelihood}; the MAE comparison alone does not
+establish the magnitude or calibration of that variance contribution.
+
+Squared error is concentrated in a subset of wavelength bins: the worst
+$10$ bins account for $@@sse10@@\%$ of the total, the worst $5$ for
+$@@sse5@@\%$, and the worst $20$ for $@@sse20@@\%$.
+The five largest squared-error contributions occur between
+$10.5$ and $11.75\,\mu$m. The top ten also include shorter-wavelength bins,
+including one at $3.9875\,\mu$m. The largest per-wavelength standardized
+error instead occurs at $@@peak_nrmse_wavelength@@\,\mu$m, where
+$\mathrm{NRMSE}_j=@@peak_nrmse@@$
+(Figure~\ref{fig:nrmse_lambda}). Absolute-error concentration and
+standardized-error maxima therefore identify different parts of the spectrum.
+
+Across design points, the spectrum-level relative $L_2$ error,
+$\|\widehat{\bm y}_i-\bm y_i\|_2/\|\bm y_i\|_2$, has median
+$@@relative_l2_median@@$, mean $@@relative_l2_mean@@$, empirical skewness
+$+@@relative_l2_skewness@@$, and maximum $@@relative_l2_max@@$. This is a
+separate metric from standard-deviation-normalized RMSE.
+Relative $L_2$ error correlates with oxygen abundance (Spearman
+$\rho=+@@oxygen_rho@@$, $p\simeq 1.0\times10^{-5}$); the other inputs have
+$|\rho|<0.08$ and $p>0.48$. The eight worst designs have mean oxygen
+abundance $+@@worst8_oxygen_standard_deviations@@$ population standard
+deviations above the design mean. These diagnostics associate larger errors
+with the high-oxygen-abundance part of the design domain, without establishing
+a causal explanation or demonstrating that errors are confined to that region.
+
+\begin{table}
+  \centering
+  \small
+  \setlength{\tabcolsep}{5pt}
+  \caption{Leave-one-out cross-validation errors over $n_H=97$
+  high-fidelity designs. The NRMSE columns report arithmetic means of
+  per-wavelength $\mathrm{RMSE}_j/s_j$, using the population standard
+  deviation $s_j$ of the held-out reference values. MAE is in ppm and in
+  units of the mean observational uncertainty
+  $\bar\sigma_{\mathrm{obs}}=@@sigma_obs_ppm@@$ ppm. Multi-fidelity runs use
+  $n_L=10\,000$. Best value per column in bold.}
+  \label{tab:cv_metrics}
+  \begin{tabular}{lcccccc}
+    \toprule
+      & \multicolumn{4}{c}{Mean per-wavelength NRMSE $(-)$}
+      & \multicolumn{2}{c}{MAE} \\
+    \cmidrule(lr){2-5}\cmidrule(lr){6-7}
+    Architecture
+      & all bins & F322W2 & F444W & MIRI
+      & (ppm) & $/\bar\sigma_{\mathrm{obs}}$ \\
+    \midrule
+    \multicolumn{7}{@{}l}{\emph{Single fidelity (HF only)}}\\
+    \quad per-$\lambda$ GP
+      & @@model1-sf_all@@ & @@model1-sf_F322W2@@ & @@model1-sf_F444W@@ & @@model1-sf_MIRI@@ & @@model1-sf_mae_ppm@@ & @@model1-sf_mae_over_sigma@@ \\
+    \quad per-$\lambda$ GPBoost
+      & @@model3-sf_all@@ & @@model3-sf_F322W2@@ & @@model3-sf_F444W@@ & @@model3-sf_MIRI@@ & @@model3-sf_mae_ppm@@ & @@model3-sf_mae_over_sigma@@ \\
+    \quad PCA--PCE$^{\dagger}$
+      & @@cn_all@@ & @@cn_F322W2@@ & @@cn_F444W@@ & @@cn_MIRI@@ & @@cn_mae_ppm@@ & @@cn_mae_over_sigma@@ \\
+    \addlinespace[2pt]
+    \multicolumn{7}{@{}l}{\emph{Multi-fidelity}}\\
+    \quad Model 1, per-$\lambda$ MFGP
+      & @@model1-mf_all@@ & @@model1-mf_F322W2@@ & @@model1-mf_F444W@@ & @@model1-mf_MIRI@@ & @@model1-mf_mae_ppm@@ & @@model1-mf_mae_over_sigma@@ \\
+    \quad Model 3, per-$\lambda$ GPBoost
+      & @@model3-mf_all@@ & @@model3-mf_F322W2@@ & @@model3-mf_F444W@@ & @@model3-mf_MIRI@@ & @@model3-mf_mae_ppm@@ & @@model3-mf_mae_over_sigma@@ \\
+    \bottomrule
+  \end{tabular}
+
+  \vspace{4pt}
+  \begin{minipage}{0.95\textwidth}
+    \footnotesize
+    Instrument columns aggregate the $103$ bins of NIRCam F322W2
+    ($2.46$--$3.99\,\mu$m), the $65$ bins of NIRCam F444W
+    ($4.00$--$4.96\,\mu$m), and the $27$ bins of MIRI LRS
+    ($5.25$--$11.75\,\mu$m). The all-bin averages weight bins equally;
+    they do not weight by wavelength interval. The MIRI bin-centre spacing
+    is $16.7$ times the NIRCam spacing.
+    $^{\dagger}$Reference surrogate of \citet{Nussbaumer2026}, evaluated
+    from the supplied leave-one-out predictions. Their row order is assumed
+    to match the high-fidelity design order because the reference file
+    contains no sample identifiers.
+  \end{minipage}
+\end{table}
