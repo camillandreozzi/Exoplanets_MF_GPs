@@ -427,15 +427,16 @@ def run_model3_lane(response_index):
         source_index = int(_SOURCE_INDEX[hold_out_position])
         y_true = float(validation_data.iloc[0, -1])
 
+        # One tuning result per fold, shared by both variants. The boosted mean
+        # is trained on HF rows only either way, so tuning does not depend on
+        # HF_only and letting fit_model3 tune per variant repeats it verbatim.
+        tuning_result = tune_model3_parameters(
+            train_data,
+            HF_only=True,
+            **model3_tuning_options(),
+        )
+
         for variant, hf_only in active_variants().items():
-            # Tuned per variant, not once per fold: the two ensembles differ in
-            # row count and in covariance, so a result tuned on one does not
-            # transfer to the other.
-            tuning_result = tune_model3_parameters(
-                train_data,
-                HF_only=hf_only,
-                **model3_tuning_options(),
-            )
             model = fit_model3(
                 train_data,
                 HF_only=hf_only,

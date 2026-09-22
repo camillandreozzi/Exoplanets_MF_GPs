@@ -5,23 +5,12 @@ The expected input shape matches ``model_1``:
 - ``is_hf`` fidelity indicator
 - one scalar response column
 
-This implements the GPBoost algorithm of Sigrist (2022, JMLR 23:232): the tree
-ensemble and the covariance parameters are estimated jointly, in one interleaved
-loop. Every boosting iteration first re-optimizes theta against the Gaussian
-process negative log-likelihood and then fits a tree that sees the resulting
-Psi^-1, either as the whitened pseudo-response or as the weight matrix in the
-leaf solve. ``gpb.train`` runs that loop for us; handing it ``gp_model=`` and
-``train_gp_model_cov_pars=True`` is what makes it the paper's algorithm rather
-than plain L2 boosting followed by a GP on the residuals.
+For the multi-fidelity variant, low-fidelity samples are used only in the
+AR(1) GP covariance component. The boosted fixed-effect mean is trained on
+high-fidelity rows only.
 
-Both variants train the trees and the GP on the same rows, because the
-algorithm requires it. For the multi-fidelity variant that means all rows: the
-AR(1) covariance spans low- and high-fidelity samples, so the ensemble does too,
-with the fidelity indicator appended as a boosting feature and separate LF/HF
-marginal means.
-
-The GP uses standardized physical coordinates, with scaling learned from
-training HF rows only. Tree inputs remain raw.
+The final residual GP uses standardized physical coordinates, with scaling
+learned from training HF rows only. Tree inputs and the tuning GP remain raw.
 """
 
 import json
@@ -33,14 +22,6 @@ import numpy as np
 
 GP_THREADS = 1
 DEFAULT_LIKELIHOOD = "gaussian"
-# Squared exponential with Automatic Relevance Determination: one range per
-# input dimension, so the nine physical parameters are free to act on different
-# length scales instead of sharing one. The multi-fidelity form wraps the same
-# base in the two-level AR(1) structure, giving the low-fidelity process and
-# the discrepancy their own parameter blocks. No cov_fct_shape here -- it is a
-# Matern/powered-exponential smoothness and has no meaning for a Gaussian one.
-SF_COV_FUNCTION = "gaussian_ard"
-MF_COV_FUNCTION = "ar1_mf_gaussian_ard"
 # Vecchia replaces the dense n x n Cholesky with a sparse ordered-conditional
 # factorization, which only pays off well above the single-fidelity row count.
 # At the 96 high-fidelity rows the SF GP sees, "none" (GPBoost's own default,
@@ -57,15 +38,6 @@ DEFAULT_BOOSTING_PARAMS = {
     # One thread per process: the CV scripts get their parallelism from running
     # many independent fits at once, so LightGBM must not also fan out per core.
     "num_threads": 1,
-    # Not optional at this response scale. The functional gradient the trees
-    # fit is Psi^-1 (y - F), and a plain gradient step is not invariant to the
-    # scale of the loss: the fluxes here have sd ~4e-4, so the estimated error
-    # variance is ~2e-8 and Psi^-1 carries entries of order 1e7, making the raw
-    # step overshoot by the same factor. On response_100 that drove the fixed
-    # effect to +/-225 against data of size 1e-3. The line search restores the
-    # scale invariance that Newton-type steps have by construction, and the
-    # same fit then lands in [5.6e-4, 1.3e-3].
-    "line_search_step_length": True,
 }
 
 _model3 = None
@@ -76,17 +48,12 @@ _model3_last_tuning = None
 
 
 class Model3Fit:
-    """Fitted Model 3: a GPBoost booster carrying its jointly estimated GP.
-
-    Thin wrapper over the booster. Its only job is the coordinate scaling,
-    which is ours rather than GPBoost's and so has to travel with the model;
-    everything else is delegated, because after a joint fit the booster already
-    knows how to combine its trees with the GP.
-    """
+    """Fitted Model 3: HF-trained boosted mean plus GP residual model."""
 
     def __init__(
         self,
         booster,
+        gp_model,
         HF_only,
         n_tree_train=None,
         n_gp_train=None,
@@ -94,106 +61,12 @@ class Model3Fit:
         gp_input_std=None,
     ):
         self.booster = booster
+        self.gp_model = gp_model
         self.HF_only = HF_only
         self.n_tree_train = n_tree_train
         self.n_gp_train = n_gp_train
         self.gp_input_mean = gp_input_mean
         self.gp_input_std = gp_input_std
-
-    @property
-    def gp_model(self):
-        """The GP estimated alongside the trees, owned by the booster."""
-        return self.booster.gp_model
-
-    def scale_coordinates(self, gp_coords_pred):
-        if self.gp_input_mean is None:
-            return gp_coords_pred
-        return _scale_gp_coordinates(
-            gp_coords_pred, self.gp_input_mean, self.gp_input_std
-        )
-
-    def predict(
-        self,
-        data,
-        gp_coords_pred,
-        predict_var=True,
-        pred_latent=False,
-        num_iteration=None,
-        predict_cov_mat=False,
-        sample_posterior=False,
-        num_post_samples=100,
-        **predict_kwargs,
-    ):
-        """Predict through the booster, scaling the GP coordinates first.
-
-        ``data`` carries the bare input columns. For the multi-fidelity variant
-        the tree also expects the fidelity indicator, but ``Booster.predict``
-        appends it from the last column of ``gp_coords_pred`` whenever the two
-        widths differ by one, so callers do not have to.
-        """
-        _reject_offset_pred(predict_kwargs)
-        return self.booster.predict(
-            data=data,
-            gp_coords_pred=self.scale_coordinates(gp_coords_pred),
-            predict_var=predict_var,
-            pred_latent=pred_latent,
-            num_iteration=num_iteration,
-            predict_cov_mat=predict_cov_mat,
-            sample_posterior=sample_posterior,
-            num_post_samples=num_post_samples,
-            **predict_kwargs,
-        )
-
-    def save_model(self, filename):
-        """Save the booster, which carries the GP, plus our input scaling."""
-        filename = Path(filename)
-        filename.parent.mkdir(parents=True, exist_ok=True)
-
-        if getattr(self.booster, "train_set", None) is None:
-            # Saving a booster that owns a GP serializes its training data
-            # alongside, and a booster restored from a file no longer holds
-            # any, so GPBoost cannot write it back out. Caught here because it
-            # otherwise surfaces as an AttributeError from inside the library.
-            raise ValueError(
-                "This Model 3 fit was loaded from a file and cannot be saved "
-                "again; save the model when it is first fitted."
-            )
-        # With a gp_model attached the booster writes a JSON document holding
-        # the GP and the training residuals, so there is no separate GP file.
-        self.booster.save_model(str(filename))
-        # Keep preprocessing with the model even when save_model() is called
-        # directly, without the module-level diagnostics writer.
-        scaling_file = filename.with_suffix(filename.suffix + ".input_scaling.json")
-        scaling_file.write_text(json.dumps(_to_jsonable({
-            "HF_only": self.HF_only,
-            "mean": self.gp_input_mean,
-            "std": self.gp_input_std,
-        }), indent=2), encoding="utf-8")
-        return {
-            "model_file": str(filename),
-            "tree_model_file": str(filename),
-            "gp_model_file": None,
-            "input_scaling_file": str(scaling_file),
-        }
-
-
-class LegacyModel3Fit(Model3Fit):
-    """A Model 3 fitted before the switch to the real GPBoost algorithm.
-
-    Those runs boosted the trees against plain L2 loss and only then fit the GP
-    once, with the frozen tree predictions as a fixed offset, so the booster
-    carries no GP and the two parts have to be recombined by hand. Kept so the
-    stored runs under ``results/model3`` still load and predict; nothing writes
-    this shape any more.
-    """
-
-    def __init__(self, booster, gp_model, HF_only, **kwargs):
-        super().__init__(booster, HF_only, **kwargs)
-        self._gp_model = gp_model
-
-    @property
-    def gp_model(self):
-        return self._gp_model
 
     def predict(
         self,
@@ -220,7 +93,10 @@ class LegacyModel3Fit(Model3Fit):
         if ignore_gp_model:
             return fixed_effect
 
-        gp_coords_pred = self.scale_coordinates(gp_coords_pred)
+        if self.gp_input_mean is not None:
+            gp_coords_pred = _scale_gp_coordinates(
+                gp_coords_pred, self.gp_input_mean, self.gp_input_std
+            )
 
         if pred_latent:
             random_effect = self.gp_model.predict(
@@ -273,6 +149,8 @@ class LegacyModel3Fit(Model3Fit):
         self.booster.save_model(str(filename))
         gp_model_file = filename.with_suffix(filename.suffix + ".gp_model.json")
         self.gp_model.save_model(str(gp_model_file))
+        # Keep preprocessing with the model even when save_model() is called
+        # directly, without the module-level diagnostics writer.
         scaling_file = filename.with_suffix(filename.suffix + ".input_scaling.json")
         scaling_file.write_text(json.dumps(_to_jsonable({
             "HF_only": self.HF_only,
@@ -317,10 +195,9 @@ def tune_model3_parameters(
     train_data
         DataFrame ending in ``is_hf`` and a scalar response column.
     HF_only
-        Selects which variant to tune. The two no longer share a result: the
-        ensembles differ in both row count and covariance, so the row-count
-        bounds in the search space and the GP in the validation loop differ
-        with them.
+        Both variants tune the boosted fixed-effect term using high-fidelity
+        rows only. In the final multi-fidelity fit, low-fidelity rows enter
+        only through the AR(1) GP covariance component.
     method
         ``"tpe"`` for Optuna TPE search or ``"grid"`` for GPBoost random
         grid search.
@@ -349,18 +226,11 @@ def tune_model3_parameters(
             validation_fraction=validation_fraction,
             random_state=seed,
         )
-    elif folds is None and not HF_only:
-        folds = _make_fidelity_stratified_folds(
-            fidelity=arrays["coords_gp"][:, -1],
-            nfold=nfold,
-            random_state=seed,
-        )
 
     method = method.lower()
     tuning_params = _tuning_base_params(params)
     tuning_gp_model = _make_tuning_gp_model(
         arrays,
-        HF_only=HF_only,
         gp_kwargs=gp_kwargs,
         train_gp_model_cov_pars=train_gp_model_cov_pars,
     )
@@ -421,14 +291,12 @@ def tune_model3_parameters(
         "n_tree_train": len(arrays["y_tree"]),
         "n_gp_train": len(arrays["y_gp"]),
         "nfold": nfold if folds is None else None,
-        "tuning_gp_covariance": tuning_gp_model.cov_function,
+        "tuning_gp_covariance": "matern",
         "use_gp_model_for_validation": use_gp_model_for_validation,
         "train_gp_model_cov_pars": train_gp_model_cov_pars,
         "validation_fraction": validation_fraction,
-        "fixed_effect_training": (
-            "high_fidelity_only" if HF_only else "all_fidelities"
-        ),
-        "lf_used_in_fixed_effect": not HF_only,
+        "fixed_effect_training": "high_fidelity_only",
+        "lf_used_in_fixed_effect": False,
         "result": _to_jsonable(opt_params),
     }
     return opt_params
@@ -452,15 +320,14 @@ def fit_model3(
 ):
     """Fit Model 3 for one scalar-response data set.
 
-    Runs the GPBoost algorithm: ``gpb.train`` alternates, within one loop,
-    between re-estimating the covariance parameters and adding a tree fitted
-    against the current Psi^-1. Trees and GP therefore span the same rows --
-    high-fidelity only when ``HF_only``, otherwise every row, with an AR(1)
-    multi-fidelity covariance and fidelity-specific marginal means. Pass
-    ``tuning_kwargs`` to override ``tune_model3_parameters`` defaults.
+    The boosted fixed-effect mean is tuned and trained on high-fidelity rows
+    only. The GP component is then fit to all eligible rows with the tree
+    predictions as offsets; for ``HF_only=False`` this GP uses an AR(1)
+    multi-fidelity covariance. Pass ``tuning_kwargs`` to override
+    ``tune_model3_parameters`` defaults.
 
-    GP coordinates are standardized using the training HF means and standard
-    deviations. Trees and their tuning retain unscaled inputs.
+    Residual GP coordinates are standardized using the training HF means and
+    standard deviations. Trees and their tuning retain unscaled inputs.
     """
     global _model3, _model3_HF_only, _model3_metadata, _model3_last_prediction
 
@@ -498,11 +365,34 @@ def fit_model3(
     if num_boost_round is None:
         num_boost_round = _best_num_boost_round(tuning_result, default=100)
 
-    # Only the GP is standardized; the trees retain raw inputs. Learn one
-    # shared transform from this fit's HF rows, not from every tree row: the
-    # multi-fidelity ensemble now trains on low-fidelity rows too, and their
-    # spread should not move the coordinates the covariance is measured in.
-    gp_input_mean, gp_input_std = _gp_input_scaling(arrays)
+    train_set = gpb.Dataset(data=arrays["x_tree"], label=arrays["y_tree"])
+    booster = gpb.train(
+        params=fit_params,
+        train_set=train_set,
+        num_boost_round=num_boost_round,
+        valid_sets=valid_sets,
+        valid_names=valid_names,
+        early_stopping_rounds=early_stopping_rounds,
+        evals_result=evals_result,
+        verbose_eval=verbose_eval,
+    )
+
+    fixed_effect_gp_train = _predict_tree_fixed_effect(
+        booster,
+        data=arrays["x_gp_offset"],
+        num_iteration=None,
+    )
+    _validate_fixed_effect(
+        fixed_effect_gp_train,
+        arrays["y_gp"],
+        fit_params,
+        num_boost_round,
+    )
+    # Only the residual GP is standardized. The trees and tuning GP retain
+    # raw inputs. Learn one shared transform from this fit's HF rows only.
+    gp_input_mean = arrays["x_tree"].mean(axis=0)
+    gp_input_std = arrays["x_tree"].std(axis=0, ddof=0)
+    gp_input_std = np.where(gp_input_std == 0, 1.0, gp_input_std)
     coords_gp = _scale_gp_coordinates(
         arrays["coords_gp"], gp_input_mean, gp_input_std
     )
@@ -511,58 +401,24 @@ def fit_model3(
         HF_only=HF_only,
         gp_kwargs=gp_kwargs,
     )
-    # The starting covariance parameters only reach the fit through the GP's
-    # own optimizer config: gpb.train never reads init_cov_pars out of the
-    # booster params, so setting them here is not interchangeable with passing
-    # them to gpb.train.
-    gp_model.set_optim_params(
+    init_cov_pars = _initial_cov_pars_for_gp_model(
+        gp_model=gp_model,
+        y=arrays["y_gp"],
+        coords=coords_gp,
+        offset=fixed_effect_gp_train,
+    )
+    gp_model.fit(
+        y=arrays["y_gp"],
+        offset=fixed_effect_gp_train,
         params=_gp_fit_params(
             train_gp_model_cov_pars,
-            init_cov_pars=_initial_cov_pars_for_gp_model(
-                gp_model=gp_model,
-                y=arrays["y_gp"],
-                coords=coords_gp,
-            ),
-        )
-    )
-
-    # free_raw_data=False is required, not a preference: the fidelity-specific
-    # mean appends a column to the retained Dataset data, and saving a booster
-    # that owns a GP fails outright once that data has been freed.
-    train_set = gpb.Dataset(
-        data=arrays["x_tree"],
-        label=arrays["y_tree"],
-        free_raw_data=False,
-    )
-    # Handing over the gp_model is what makes this the GPBoost algorithm: each
-    # iteration re-estimates the covariance parameters and then fits its tree
-    # against the resulting Psi^-1.
-    booster = gpb.train(
-        params=fit_params,
-        train_set=train_set,
-        gp_model=gp_model,
-        train_gp_model_cov_pars=train_gp_model_cov_pars,
-        use_gp_model_for_validation=use_gp_model_for_validation,
-        num_boost_round=num_boost_round,
-        valid_sets=valid_sets,
-        valid_names=valid_names,
-        early_stopping_rounds=early_stopping_rounds,
-        evals_result=evals_result,
-        verbose_eval=verbose_eval,
-    )
-    _validate_fixed_effect(
-        _predict_tree_fixed_effect(
-            booster,
-            data=arrays["x_tree"],
-            gp_coords_pred=coords_gp,
+            init_cov_pars=init_cov_pars,
         ),
-        arrays["y_gp"],
-        fit_params,
-        num_boost_round,
     )
 
     model = Model3Fit(
         booster=booster,
+        gp_model=gp_model,
         HF_only=HF_only,
         n_tree_train=len(arrays["y_tree"]),
         n_gp_train=len(arrays["y_gp"]),
@@ -678,13 +534,7 @@ def save_model3(filename):
 
 
 def load_model3(filename, HF_only=None):
-    """Load a saved Model 3 object into the module-level prediction state.
-
-    Reads both on-disk shapes. A jointly fitted booster carries its GP, so the
-    file stands alone; runs saved before the switch to the GPBoost algorithm
-    left the GP in a ``.gp_model.json`` sidecar next to a GP-less booster, and
-    those load as a ``LegacyModel3Fit``.
-    """
+    """Load a saved Model 3 object into the module-level prediction state."""
     global _model3, _model3_HF_only, _model3_metadata, _model3_last_prediction
 
     filename = Path(filename)
@@ -698,22 +548,15 @@ def load_model3(filename, HF_only=None):
     elif saved_hf_only is not None and HF_only != saved_hf_only:
         raise ValueError("HF_only does not match the saved Model 3 fidelity variant.")
 
-    scaling_kwargs = {
-        "gp_input_mean": (np.asarray(scaling["mean"], dtype=float)
-                          if scaling.get("mean") is not None else None),
-        "gp_input_std": (np.asarray(scaling["std"], dtype=float)
-                         if scaling.get("std") is not None else None),
-    }
-
-    legacy = not booster.has_gp_model and gp_model_file.exists()
-    if booster.has_gp_model:
-        model = Model3Fit(booster=booster, HF_only=HF_only, **scaling_kwargs)
-    elif legacy:
-        model = LegacyModel3Fit(
+    if gp_model_file.exists():
+        model = Model3Fit(
             booster=booster,
             gp_model=gpb.GPModel(model_file=str(gp_model_file)),
             HF_only=HF_only,
-            **scaling_kwargs,
+            gp_input_mean=(np.asarray(scaling["mean"], dtype=float)
+                           if scaling.get("mean") is not None else None),
+            gp_input_std=(np.asarray(scaling["std"], dtype=float)
+                          if scaling.get("std") is not None else None),
         )
     else:
         model = booster
@@ -724,8 +567,7 @@ def load_model3(filename, HF_only=None):
         "model": "model3",
         "HF_only": HF_only,
         "model_file": str(filename),
-        "gp_model_file": str(gp_model_file) if legacy else None,
-        "legacy_two_stage_fit": legacy,
+        "gp_model_file": str(gp_model_file) if gp_model_file.exists() else None,
         "input_scaling": scaling,
     }
     _model3_last_prediction = None
@@ -748,7 +590,8 @@ def make_model3_gp_model(gp_coords, HF_only=False, gp_kwargs=None):
 
     kwargs = {
         "gp_coords": gp_coords,
-        "cov_function": SF_COV_FUNCTION if HF_only else MF_COV_FUNCTION,
+        "cov_function": "matern" if HF_only else "ar1_mf_matern",
+        "cov_fct_shape": 1.5,
         "gp_approx": DEFAULT_GP_APPROX_SF if HF_only else DEFAULT_GP_APPROX_MF,
         "num_neighbors": 20,
         "likelihood": DEFAULT_LIKELIHOOD,
@@ -757,10 +600,8 @@ def make_model3_gp_model(gp_coords, HF_only=False, gp_kwargs=None):
     if gp_kwargs is not None:
         kwargs.update(gp_kwargs)
 
-    # fidelity_specific_mean is left at the GPBoost default, which is True for
-    # an ar1_mf_ covariance: gpb.train then appends the fidelity indicator from
-    # the last coordinate column as a boosting feature, so the two fidelities
-    # get their own marginal means instead of sharing one.
+    if not HF_only and str(kwargs.get("cov_function", "")).startswith("ar1_mf_"):
+        kwargs["fidelity_specific_mean"] = False
 
     if kwargs.get("gp_approx") == "vecchia" and kwargs.get("num_neighbors") is not None:
         kwargs["num_neighbors"] = min(int(kwargs["num_neighbors"]), gp_coords.shape[0] - 1)
@@ -772,13 +613,8 @@ def make_model3_gp_model(gp_coords, HF_only=False, gp_kwargs=None):
     return gpb.GPModel(**kwargs)
 
 
-def _make_tuning_gp_model(
-    arrays,
-    HF_only=False,
-    gp_kwargs=None,
-    train_gp_model_cov_pars=True,
-):
-    """The GP the tuner validates against: the same one the fit will use.
+def _make_tuning_gp_model(arrays, gp_kwargs=None, train_gp_model_cov_pars=True):
+    """The GP the tuner validates against.
 
     Without a ``gp_model`` the tuner scores tree-only CV error, so it selects a
     tree that absorbs the smooth structure the GP exists to model: on one LOO
@@ -786,25 +622,19 @@ def _make_tuning_gp_model(
     0.099 with 4 leaves once the GP is in the loop. For the multi-fidelity
     variant that would leave the AR(1) component nothing to carry.
 
-    Known discrepancy, for the multi-fidelity variant only. GPBoost's CV path
-    does not reproduce a fidelity-specific mean: it rebuilds each fold's GP
-    from an explicit attribute list that omits ``fidelity_specific_mean``, and
-    it constructs fold boosters directly rather than through ``gpb.train``,
-    which is the only place the fidelity feature is appended. Folds therefore
-    behave as if the mean were shared, while the final fit gives each fidelity
-    its own -- quietly, with no error. The tuned tree parameters are still
-    chosen against the right covariance on the right rows, which is what they
-    are for, but they are not chosen against exactly the fitted model.
+    The boosted mean is trained on high-fidelity rows only in both variants, so
+    this is the single-fidelity Matern GP on those rows either way; it is a
+    proxy for the AR(1) GP that the multi-fidelity fit ultimately uses.
     """
     gp_model = make_model3_gp_model(
-        arrays["coords_gp"],
-        HF_only=HF_only,
+        arrays["x_tree"],
+        HF_only=True,
         gp_kwargs=gp_kwargs,
     )
     init_cov_pars = _initial_cov_pars_for_gp_model(
         gp_model=gp_model,
-        y=arrays["y_gp"],
-        coords=arrays["coords_gp"],
+        y=arrays["y_tree"],
+        coords=arrays["x_tree"],
     )
     gp_model.set_optim_params(
         params=_gp_fit_params(
@@ -815,54 +645,29 @@ def _make_tuning_gp_model(
     return gp_model
 
 
-def _make_fidelity_stratified_folds(fidelity, nfold, random_state):
-    """k-fold indices that keep both fidelities in every fold.
-
-    GPBoost's own splitter shuffles row indices without regard to fidelity, and
-    the low-fidelity rows outnumber the high-fidelity ones by two orders of
-    magnitude here, so a plain split can hand the AR(1) covariance a fold with
-    almost no high-fidelity rows to correlate against.
-    """
-    fidelity = np.asarray(fidelity).reshape(-1)
-    rng = np.random.default_rng(random_state)
-    assignment = np.empty(len(fidelity), dtype=int)
-
-    for value in np.unique(fidelity):
-        positions = np.where(fidelity == value)[0]
-        shuffled = rng.permutation(len(positions))
-        assignment[positions[shuffled]] = np.arange(len(positions)) % nfold
-
-    folds = []
-    for fold in range(nfold):
-        test_idx = np.where(assignment == fold)[0]
-        train_idx = np.where(assignment != fold)[0]
-        if len(test_idx) == 0 or len(train_idx) == 0:
-            continue
-        folds.append((train_idx, test_idx))
-    return folds
-
-
 def default_model3_search_space(n_train):
     """Default Optuna/TPE ranges from the GPBoost template, bounded by data size.
 
-    ``learning_rate`` spans the template's full range. It used to stop at 1,
-    because the fit boosted the trees on their own and plain L2 boosting only
-    contracts the residual below a rate of 2 -- above it the fixed effect grew
-    geometrically and overflowed the likelihood. Boosting now runs against the
-    GP, with an optional line search for the step length, so the template bound
-    applies again.
+    ``learning_rate`` is capped at 1 rather than the template's 10. The tuner
+    scores each trial with the GP in the loop, where a rate above 1 only makes
+    the boosting converge badly (huge but finite CV error), so such a trial can
+    still win a fold. The final fit trains the tree on its own, where L2
+    boosting is only contractive for a rate below 2: at 3.2 the fixed effect
+    reaches ~1e154 after 1000 rounds, and the GP fit then dies with "NaN
+    occurred in initial negative log-likelihood".
     """
     max_bin = max(63, min(10000, int(n_train)))
     min_data_in_leaf_upper = max(1, min(1000, int(n_train)))
 
     return {
-        "learning_rate": [0.001, 10],
+        "learning_rate": [0.001, 1],
         "min_data_in_leaf": [1, min_data_in_leaf_upper],
         "max_depth": [-1, -1],
         "num_leaves": [2, 1024],
         "lambda_l2": [0, 100],
         "max_bin": [63, max_bin],
         "feature_fraction": [0.5, 1],
+        "line_search_step_length": [True, False],
     }
 
 
@@ -873,7 +678,8 @@ def default_model3_param_grid(n_train):
     )
 
     return {
-        "learning_rate": [0.001, 0.01, 0.1, 1, 10],
+        # 10 is dropped for the reason given in default_model3_search_space.
+        "learning_rate": [0.001, 0.01, 0.1, 1],
         "min_data_in_leaf": _unique_preserving_order(
             [1, 10, 100, min(1000, int(n_train))]
         ),
@@ -882,6 +688,7 @@ def default_model3_param_grid(n_train):
         "lambda_l2": [0, 1, 10, 100],
         "max_bin": max_bin_values,
         "feature_fraction": [0.5, 0.75, 1],
+        "line_search_step_length": [True, False],
     }
 
 
@@ -898,32 +705,20 @@ def _prepare_model3_training_arrays(train_data, HF_only):
         return {
             "x_tree": x_all[hf_indices],
             "y_tree": y_all[hf_indices],
+            "x_gp_offset": x_all[hf_indices],
             "coords_gp": x_all[hf_indices],
             "y_gp": y_all[hf_indices],
-            "x_hf": x_all[hf_indices],
             "tree_row_indices": hf_indices,
         }
 
-    # Tree rows and GP rows have to coincide for the GPBoost algorithm, so the
-    # multi-fidelity ensemble trains on the low-fidelity rows as well. They
-    # reach the trees through the fidelity indicator gpb.train appends, which
-    # is what gives the two fidelities their own marginal means.
     return {
-        "x_tree": x_all,
-        "y_tree": y_all,
+        "x_tree": x_all[hf_indices],
+        "y_tree": y_all[hf_indices],
+        "x_gp_offset": x_all,
         "coords_gp": coords_mf,
         "y_gp": y_all,
-        "x_hf": x_all[hf_indices],
-        "tree_row_indices": np.arange(len(y_all)),
+        "tree_row_indices": hf_indices,
     }
-
-
-def _gp_input_scaling(arrays):
-    """Standardization for the GP coordinates, learned on HF rows only."""
-    x_hf = arrays["x_hf"]
-    mean = x_hf.mean(axis=0)
-    std = x_hf.std(axis=0, ddof=0)
-    return mean, np.where(std == 0, 1.0, std)
 
 
 def _prepare_model3_prediction_arrays(validation_data, HF_only):
@@ -944,7 +739,7 @@ def _validate_model3_training_arrays(arrays):
         model_part="Model 3 fixed-effect tree",
     )
     _validate_training_arrays(
-        arrays["x_tree"],
+        arrays["x_gp_offset"],
         arrays["coords_gp"],
         arrays["y_gp"],
         model_part="Model 3 GP",
@@ -986,14 +781,14 @@ def _fit_params(params, tuning_result):
 
 
 def _validate_fixed_effect(fixed_effect, y, fit_params, num_boost_round):
-    """Fail on a diverged boosted mean rather than let it reach a prediction.
+    """Fail on a diverged boosted mean before the GP sees it.
 
-    The trees fit the functional gradient Psi^-1 (y - F), whose scale is that
-    of the inverse error variance -- about 1e7 for these fluxes. Without
-    line_search_step_length the step inherits that factor and the ensemble runs
-    away geometrically: on response_100 it reached +/-225 against data of size
-    1e-3, and the covariance parameters chased it up by nine orders of
-    magnitude. The values stay finite, so nothing downstream would notice.
+    A learning rate at or above 2 makes L2 boosting expand rather than shrink
+    the residual, so the fixed effect grows geometrically with the number of
+    rounds. The values stay finite for a long while (~1e154 at learning_rate
+    3.2 over 1000 rounds) but squaring them inside the likelihood overflows,
+    and GPBoost then reports only "NaN occurred in initial negative
+    log-likelihood" from inside the GP fit, with no hint of where it came from.
     """
     # Generous: a sane fixed effect sits within the response range, and the
     # diverged one is many orders of magnitude past this bound.
@@ -1009,8 +804,8 @@ def _validate_fixed_effect(fixed_effect, y, fit_params, num_boost_round):
         f"after {num_boost_round} boosting rounds with "
         f"learning_rate={fit_params.get('learning_rate')}, "
         f"num_leaves={fit_params.get('num_leaves')}, "
-        f"line_search_step_length={fit_params.get('line_search_step_length')}. "
-        "line_search_step_length=False is the usual cause at this response scale."
+        f"min_data_in_leaf={fit_params.get('min_data_in_leaf')}. "
+        "Lower the learning_rate bound in the tuning search space."
     )
 
 
@@ -1115,14 +910,9 @@ def _coordinate_range_scale(coords):
     return max(range_scale, np.finfo(float).eps)
 
 
-def _reject_offset_pred(predict_kwargs):
-    if "offset_pred" in predict_kwargs:
-        raise ValueError("Model 3 takes its fixed effect from the boosted trees.")
-
-
 def _split_model3_predict_kwargs(predict_kwargs):
-    """Route prediction kwargs for a legacy fit, whose GP is a separate model."""
-    _reject_offset_pred(predict_kwargs)
+    if "offset_pred" in predict_kwargs:
+        raise ValueError("Model 3 sets offset_pred from the boosted fixed-effect term.")
 
     gp_keys = {
         "cov_pars",
@@ -1146,15 +936,8 @@ def _predict_tree_fixed_effect(
     booster,
     data,
     num_iteration=None,
-    gp_coords_pred=None,
     predict_kwargs=None,
 ):
-    """The tree ensemble's contribution alone, whether or not it owns a GP.
-
-    ``gp_coords_pred`` is only needed for a booster with a fidelity-specific
-    mean, which reads the indicator off its last column to complete the tree
-    features; it is ignored otherwise.
-    """
     predict_kwargs = dict(predict_kwargs or {})
 
     if predict_kwargs.pop("pred_leaf", False):
@@ -1164,14 +947,10 @@ def _predict_tree_fixed_effect(
 
     predict_kwargs.pop("raw_score", None)
     predict_kwargs.pop("pred_latent", None)
-    predict_kwargs.pop("ignore_gp_model", None)
-    if gp_coords_pred is not None:
-        predict_kwargs["gp_coords_pred"] = gp_coords_pred
     fixed_effect = booster.predict(
         data=data,
         num_iteration=num_iteration,
         pred_latent=True,
-        ignore_gp_model=True,
         **predict_kwargs,
     )
     fixed_effect = np.asarray(fixed_effect, dtype=float)
@@ -1275,17 +1054,10 @@ def _get_model3_metadata(
         "n_gp_train": n_gp_train,
         "n_hf": int(np.sum(train_data.iloc[:, -2].to_numpy() == 1)),
         "n_lf": int(np.sum(train_data.iloc[:, -2].to_numpy() == 0)),
-        "n_lf_in_fixed_effect": (
-            0 if HF_only else int(np.sum(train_data.iloc[:, -2].to_numpy() == 0))
-        ),
-        "fixed_effect_training": (
-            "high_fidelity_only" if HF_only else "all_fidelities"
-        ),
-        "lf_used_in_fixed_effect": not HF_only,
-        "algorithm": "gpboost_joint",
-        "gp_covariance": (gp_kwargs or {}).get(
-            "cov_function", SF_COV_FUNCTION if HF_only else MF_COV_FUNCTION
-        ),
+        "n_lf_in_fixed_effect": 0,
+        "fixed_effect_training": "high_fidelity_only",
+        "lf_used_in_fixed_effect": False,
+        "gp_covariance": "matern" if HF_only else "ar1_mf_matern",
         "x_columns": list(train_data.columns[:-2]),
         "params": params,
         "num_boost_round": num_boost_round,

@@ -14,13 +14,6 @@ _model1_last_prediction = None
 _model1_input_mean = None
 _model1_input_std = None
 GP_THREADS = 1
-# Squared exponential with Automatic Relevance Determination: one range per
-# input dimension, so the nine physical parameters are free to act on different
-# length scales instead of sharing one. The multi-fidelity form wraps the same
-# base in the two-level AR(1) structure. No cov_fct_shape goes with these -- it
-# is a Matern smoothness and has no meaning for a Gaussian covariance.
-SF_COV_FUNCTION = "gaussian_ard"
-MF_COV_FUNCTION = "ar1_mf_gaussian_ard"
 
 def _fit_input_scaler(x, fidelity):
     x_hf = x[fidelity == 1]
@@ -65,7 +58,8 @@ def fit_model1(train_data, HF_only=False, init_cov_pars=None):
 
     gp_model = gpb.GPModel(
         gp_coords=coords,
-        cov_function=SF_COV_FUNCTION if HF_only else MF_COV_FUNCTION,
+        cov_function="matern" if HF_only else "ar1_mf_matern",
+        cov_fct_shape=1.5,
         gp_approx="vecchia",
         num_neighbors=20,
         likelihood="gaussian",
